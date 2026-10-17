@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Setlog</title>
+  <meta name="description" content="Personal workout, cardio, stretch and bodyweight log">
+  <meta name="theme-color" content="#f4f2ed" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Setlog">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <main id="main" aria-live="polite"><div class="empty">Loading…</div></main>
+  <nav class="tabbar" aria-label="Main">
+    <a href="#/train" data-tab="train"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h3M19 12h3M5 8v8M19 8v8M8 6v12M16 6v12M8 12h8"/></svg><span>Train</span></a>
+    <a href="#/history" data-tab="history"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg><span>History</span></a>
+    <a href="#/exercises" data-tab="exercises"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/></svg><span>Exercises</span></a>
+    <a href="#/weight" data-tab="weight"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-5 4 3 8-8"/><path d="M15 7h5v5"/></svg><span>Weight</span></a>
+    <a href="#/settings" data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4L5.3 5.3"/></svg><span>Settings</span></a>
+  </nav>
+  <div id="sheet"></div>
+  <div id="toast" role="status"></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
