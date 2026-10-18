@@ -2,22 +2,30 @@ import { db } from './db.js';
 import { SEED_EXERCISES, MUSCLES, CATEGORIES } from './seed.js';
 import { renderChart } from './chart.js';
 import {
-  uid, esc, DAY, parseDur, fmtDur, fmtLength, localISO, fmtDate, fmtTime, num,
+  uid, esc, DAY, parseDur, fmtDur, fmtLength, localISO, startOfWeek, addDays, fmtDate, fmtTime, num,
   TYPES, MODALITIES, isCardio, fieldsFor, fmtField, summariseSet, setLabel,
   defaultTarget, targetFields, setFromTarget, blocks, estimateSec, metricsFor, rollingMean,
 } from './util.js';
 
-const APP_VERSION = '1.0.0';
+const APP_NAME = 'Workout_jfp';
+const FILE_PREFIX = 'workout_jfp';
+const APP_VERSION = '1.1.0';
 const DEFAULT_CFG = { secPerRep: 3, minSetSec: 20, changeoverSec: 60 };
 const BACKUP_DAYS = 14;
+const THEMES = { auto: 'Auto', light: 'Light', dark: 'Dark' };
+const THEME_BG = { light: '#f4f2ed', dark: '#121212' };
 
 // ---------------- State ----------------
 const S = { ex: new Map(), routines: [], sessions: [], weights: [], meta: {} };
 const UI = {
   exq: '', excat: 'All', exmus: '', exarch: false,
   wrange: '3M', metric: {}, draft: null, exDraft: null, picker: null, menu: null,
+  week: null, pday: null, planAdd: false, hview: 'month', hcur: Date.now(), hday: null,
 };
 const cfg = () => ({ ...DEFAULT_CFG, ...(S.meta.settings || {}) });
+// Weekly plan, stored in meta 'plan': { 'YYYY-MM-DD': [{ id, routineId }] }
+const plan = () => S.meta.plan || {};
+const savePlan = p => setMeta('plan', p);
 const exList = () => [...S.ex.values()].sort((a, b) => a.name.localeCompare(b.name));
 const sessionsDesc = () => [...S.sessions].sort((a, b) => b.start - a.start);
 
@@ -56,6 +64,40 @@ function lastPerf(exId, excludeId) {
 }
 const usage = exId => S.sessions.filter(s => s.items.some(i => i.exId === exId)).length;
 const routineLastDone = rid => sessionsDesc().find(s => s.routineId === rid);
+function sessionsByDay() {
+  const m = new Map();
+  for (const s of sessionsDesc()) {
+    const k = localISO(new Date(s.start));
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(s);
+  }
+  return m;
+}
+// Pair each planned entry with a session of the same routine that day; the rest are unplanned extras.
+function planStatus(entries, sessions) {
+  const left = [...sessions];
+  const out = entries.map(e => {
+    const i = left.findIndex(s => s.routineId && s.routineId === e.routineId);
+    return { ...e, session: i < 0 ? null : left.splice(i, 1)[0] };
+  });
+  return { entries: out, extra: left };
+}
+// Exercise count per category across a day's sessions.
+function catCounts(ss) {
+  const n = {};
+  for (const s of ss) for (const it of s.items) { const c = S.ex.get(it.exId)?.category; if (c) n[c] = (n[c] || 0) + 1; }
+  return n;
+}
+const catClass = c => 'c-' + c.toLowerCase();
+const catDots = ss => {
+  const n = catCounts(ss);
+  const cats = CATEGORIES.filter(c => n[c]);
+  return (cats.length ? cats : ['none']).map(c => `<i class="cd ${catClass(c)}"></i>`).join('');
+};
+const topCat = ss => {
+  const n = catCounts(ss);
+  return CATEGORIES.reduce((best, c) => (n[c] || 0) > (n[best] || 0) ? c : best, 'none');
+};
 const backupDue = () => (S.sessions.length || S.weights.length) &&
   Date.now() - (S.meta.lastBackup || S.meta.firstUse || Date.now()) > BACKUP_DAYS * DAY;
 
@@ -260,11 +302,111 @@ function trainView() {
         <div><div class="eyebrow">In progress</div><div class="routine-name">${esc(a.name)}</div>
         <div class="muted">Started ${fmtTime(a.start)} · <span data-elapsed="${a.start}">${fmtLength(Date.now() - a.start > 0 ? (Date.now() - a.start) / 1000 : 0)}</span></div></div>
         <span class="btn">Resume</span></a>` : ''}
+    ${weekHtml()}
     <section>
       <div class="sec-h"><h2>Routines</h2><button class="link" data-act="newRoutine">+ New routine</button></div>
       ${routines || `<div class="empty">No routines yet. Create one, e.g. “Pull day” or “Evening stretch”, and pick its exercises.</div>`}
     </section>
     <button class="btn ghost wide" data-act="start" data-id="">Start an empty session</button>`;
+}
+
+const curMonday = () => startOfWeek(UI.week ? new Date(UI.week) : new Date());
+const weekIsos = mon => [...Array(7)].map((_, i) => localISO(addDays(mon, i)));
+const longDay = iso => fmtDate(new Date(iso + 'T12:00:00'), { weekday: 'long', day: 'numeric', month: 'long' });
+
+function weekHtml() {
+  const today = localISO();
+  const mon = curMonday();
+  const isos = weekIsos(mon);
+  const sel = isos.includes(UI.pday) ? UI.pday : isos.includes(today) ? today : isos[0];
+  const byDay = sessionsByDay();
+  const p = plan();
+  const st = Object.fromEntries(isos.map(iso => [iso, planStatus(p[iso] || [], byDay.get(iso) || [])]));
+  const thisWeek = isos.includes(today);
+  const label = thisWeek ? 'This week'
+    : `${fmtDate(mon, { day: 'numeric', month: 'short' })} – ${fmtDate(addDays(mon, 6), { day: 'numeric', month: 'short' })}`;
+  const strip = isos.map(iso => {
+    const d = new Date(iso + 'T12:00:00');
+    const { entries, extra } = st[iso];
+    const pips = [...entries.map(e => e.session ? 'done' : iso < today ? 'missed' : ''), ...extra.map(() => 'done')]
+      .slice(0, 4).map(c => `<i class="pip ${c}"></i>`).join('');
+    return `<button class="wday${iso === sel ? ' on' : ''}${iso === today ? ' today' : ''}" data-act="pday" data-v="${iso}">
+      <span>${fmtDate(d, { weekday: 'short' })}</span><b>${d.getDate()}</b><span class="pips">${pips}</span></button>`;
+  }).join('');
+  const doneRow = s => `<a class="plan-row" href="#/history/${s.id}"><span class="pchk">✓</span>
+    <span class="grow"><span class="item-name">${esc(s.name)}</span><span class="muted">${s.end ? 'Done · ' + fmtLength((s.end - s.start) / 1000) : 'Done'}</span></span><span class="chev">›</span></a>`;
+  const { entries, extra } = st[sel];
+  const rows = [
+    ...entries.map(e => {
+      if (e.session) return doneRow(e.session);
+      const r = S.routines.find(x => x.id === e.routineId);
+      return `<div class="plan-row"><span class="pchk"><i class="pip ${sel < today ? 'missed' : ''}"></i></span>
+        ${r ? `<a class="grow" href="#/routine/${r.id}"><span class="item-name">${esc(r.name)}</span><span class="muted">~${fmtLength(routineEst(r))}</span></a>`
+          : `<span class="grow muted">Deleted routine</span>`}
+        ${r && sel === today && r.items.length ? `<button class="btn sm" data-act="start" data-id="${r.id}">Start</button>` : ''}
+        <button class="icon" data-act="planDel" data-v="${sel}" data-id="${e.id}" aria-label="Remove from plan">✕</button></div>`;
+    }),
+    ...extra.map(doneRow),
+  ].join('');
+  const add = UI.planAdd
+    ? `<div class="chips">${S.routines.map(r => `<button class="chip" data-act="planAdd" data-v="${sel}" data-id="${r.id}">${esc(r.name)}</button>`).join('')
+      || '<span class="muted">Create a routine first.</span>'}<button class="chip" data-act="planAddToggle">Cancel</button></div>`
+    : `<button class="link" data-act="planAddToggle">+ Plan a routine</button>`;
+  return `<section>
+    <div class="sec-h"><h2>${label}</h2><div class="wnav">
+      <button class="icon" data-act="wk" data-v="-1" aria-label="Previous week">‹</button>
+      ${thisWeek ? '' : '<button class="link" data-act="wk" data-v="0">Today</button>'}
+      <button class="icon" data-act="wk" data-v="1" aria-label="Next week">›</button></div></div>
+    <div class="week">${strip}</div>
+    <div class="card plan-day">
+      <div class="muted">${longDay(sel)}</div>
+      ${rows || '<div class="muted plan-empty">Nothing planned.</div>'}
+      ${add}
+    </div>
+    <div class="plan-actions">
+      <button class="link" data-act="planCopy">Copy last week</button>
+      <button class="link" data-act="planIcs">Add week to Calendar</button>
+    </div>
+  </section>`;
+}
+
+function copyLastWeek() {
+  const mon = curMonday();
+  const src = weekIsos(addDays(mon, -7)), dst = weekIsos(mon);
+  const p = { ...plan() };
+  const n = src.reduce((k, iso) => k + (p[iso]?.length || 0), 0);
+  if (!n) return toast('Last week has no plan to copy');
+  if (dst.some(iso => p[iso]?.length) && !confirm('Replace this week’s plan with last week’s?')) return;
+  dst.forEach((iso, i) => {
+    const e = (p[src[i]] || []).map(x => ({ id: uid(), routineId: x.routineId }));
+    if (e.length) p[iso] = e; else delete p[iso];
+  });
+  savePlan(p); toast(`Copied ${n} planned session${n === 1 ? '' : 's'}`); rerender();
+}
+
+// One-way export of the visible week's plan as all-day calendar events.
+const icsText = s => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+const icsFold = line => { let out = ''; while (line.length > 74) { out += line.slice(0, 74) + '\r\n '; line = line.slice(74); } return out + line; };
+function exportWeekIcs() {
+  const mon = curMonday();
+  const p = plan();
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const lines = [];
+  for (const iso of weekIsos(mon)) {
+    const next = localISO(addDays(new Date(iso + 'T12:00:00'), 1));
+    for (const e of p[iso] || []) {
+      const r = S.routines.find(x => x.id === e.routineId);
+      if (!r) continue;
+      const exNames = r.items.map(it => S.ex.get(it.exId)?.name).filter(Boolean);
+      lines.push('BEGIN:VEVENT', `UID:${e.id}@workout-jfp`, `DTSTAMP:${stamp}`,
+        `DTSTART;VALUE=DATE:${iso.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${next.replace(/-/g, '')}`,
+        `SUMMARY:${icsText(r.name)}`, `DESCRIPTION:${icsText([`~${fmtLength(routineEst(r))}`, ...exNames].join('\n'))}`, 'END:VEVENT');
+    }
+  }
+  if (!lines.length) return toast('Nothing planned this week');
+  const text = ['BEGIN:VCALENDAR', 'VERSION:2.0', `PRODID:-//${APP_NAME}//EN`, 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', ...lines, 'END:VCALENDAR']
+    .map(icsFold).join('\r\n') + '\r\n';
+  deliver(`${FILE_PREFIX}-week-${localISO(mon)}.ics`, text, 'text/calendar');
 }
 
 // ---------------- Routine editor ----------------
@@ -349,10 +491,16 @@ function liveSessionView() {
     </div>
     ${sessionItemsHtml(s, 'live')}
     <button class="btn ghost wide" data-act="pickForSession" data-mode="live">+ Add exercise</button>
+    ${effortHtml(s, 'live')}
     <label class="field"><span>Session note</span><textarea class="in" rows="2" data-in="sessNote" data-mode="live" placeholder="How did it go?">${esc(s.note)}</textarea></label>
     <button class="btn wide" data-act="finish">Finish session</button>
     <div class="danger-zone"><button class="link danger" data-act="discard">Discard session</button></div>`;
 }
+
+// Optional session effort, 1–5. Tap the selected value again to clear it.
+const effortHtml = (s, mode) => `<div class="field"><span>Effort (optional)</span>
+  <div class="effort">${[1, 2, 3, 4, 5].map(n => `<button class="chip ${s.effort === n ? 'on' : ''}" data-act="effort" data-mode="${mode}" data-v="${n}" aria-pressed="${s.effort === n}">${n}</button>`).join('')}</div>
+  <small class="muted">1 easy · 3 moderate · 5 all-out</small></div>`;
 
 function sessionItemsHtml(s, mode) {
   if (!s.items.length) return `<div class="empty">Add exercises to start logging.</div>`;
@@ -429,12 +577,53 @@ function updateSessionCounters() {
 }
 
 // ---------------- History ----------------
+// Visible History period [a, b) for the current view.
+function histRange() {
+  const c = new Date(UI.hcur);
+  if (UI.hview === 'week') {
+    const a = startOfWeek(c);
+    return { a, b: addDays(a, 7), label: `${fmtDate(a, { day: 'numeric', month: 'short' })} – ${fmtDate(addDays(a, 6), { day: 'numeric', month: 'short', year: 'numeric' })}` };
+  }
+  if (UI.hview === 'year') return { a: new Date(c.getFullYear(), 0, 1), b: new Date(c.getFullYear() + 1, 0, 1), label: String(c.getFullYear()) };
+  const a = new Date(c.getFullYear(), c.getMonth(), 1);
+  return { a, b: new Date(c.getFullYear(), c.getMonth() + 1, 1), label: fmtDate(a, { month: 'long', year: 'numeric' }) };
+}
+
+function historyCalendar(byDay, a, b) {
+  const today = localISO();
+  if (UI.hview === 'year') {
+    const y = a.getFullYear();
+    return `<div class="years">${[...Array(12)].map((_, m) => {
+      const first = new Date(y, m, 1);
+      const lead = (first.getDay() + 6) % 7;
+      const len = new Date(y, m + 1, 0).getDate();
+      const cells = '<i class="blank"></i>'.repeat(lead) + [...Array(len)].map((_, i) => {
+        const ss = byDay.get(localISO(new Date(y, m, i + 1)));
+        return ss ? `<i class="${catClass(topCat(ss))}"></i>` : '<i></i>';
+      }).join('');
+      return `<button class="ymonth" data-act="hmonth" data-v="${m}"><b>${fmtDate(first, { month: 'short' })}</b><span class="ygrid">${cells}</span></button>`;
+    }).join('')}</div>`;
+  }
+  const days = [];
+  for (let d = startOfWeek(a); d < b || days.length % 7; d = addDays(d, 1)) days.push(d);
+  return `<div class="cal">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map(x => `<span class="cal-h">${x}</span>`).join('')}${days.map(d => {
+    const iso = localISO(d); const ss = byDay.get(iso);
+    return `<button class="cday${d < a || d >= b ? ' out' : ''}${iso === today ? ' today' : ''}${iso === UI.hday ? ' on' : ''}" data-act="hday" data-v="${iso}" ${ss ? '' : 'disabled'}>
+      <span>${d.getDate()}</span><span class="cdots">${ss ? catDots(ss) : ''}</span></button>`;
+  }).join('')}</div>`;
+}
+
 function historyView() {
-  const list = sessionsDesc();
+  const byDay = sessionsByDay();
+  const { a, b, label } = histRange();
+  const inRange = sessionsDesc().filter(s => s.start >= a.getTime() && s.start < b.getTime());
+  const list = UI.hday ? (byDay.get(UI.hday) || []) : inRange;
+  const total = inRange.reduce((t, s) => t + (s.end ? (s.end - s.start) / 1000 : 0), 0);
+  const monthHeads = UI.hview === 'year' && !UI.hday;
   let month = '';
   const rows = list.map(s => {
     const m = fmtDate(s.start, { month: 'long', year: 'numeric' });
-    const head = m !== month ? `<h3 class="month">${m}</h3>` : '';
+    const head = monthHeads && m !== month ? `<h3 class="month">${m}</h3>` : '';
     month = m;
     const sets = s.items.reduce((n, it) => n + it.sets.length, 0);
     const dur = s.end ? fmtLength((s.end - s.start) / 1000) : '';
@@ -444,7 +633,18 @@ function historyView() {
       <div class="muted">${dur}${s.estSec ? ` (est ${fmtLength(s.estSec)})` : ''} · ${s.items.length} exercise${s.items.length === 1 ? '' : 's'} · ${sets} set${sets === 1 ? '' : 's'}</div></div>
       <span class="chev">›</span></a>`;
   }).join('');
-  return `${header('History')}${backupBanner()}${rows || `<div class="empty">Finished sessions appear here.</div>`}`;
+  const n = inRange.length;
+  return `${header('History')}${backupBanner()}
+    <div class="chips">${['week', 'month', 'year'].map(v => `<button class="chip ${UI.hview === v ? 'on' : ''}" data-act="hview" data-v="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>
+    <div class="sec-h"><h2>${esc(label)}</h2><div class="wnav">
+      <button class="icon" data-act="hnav" data-v="-1" aria-label="Previous">‹</button>
+      <button class="link" data-act="hnav" data-v="0">Today</button>
+      <button class="icon" data-act="hnav" data-v="1" aria-label="Next">›</button></div></div>
+    <div class="card">${historyCalendar(byDay, a, b)}
+      <div class="legend cat-legend">${CATEGORIES.map(c => `<span><i class="cd ${catClass(c)}"></i>${c}</span>`).join('')}</div></div>
+    <div class="sec-h"><h2>${UI.hday ? esc(longDay(UI.hday)) : `${n} session${n === 1 ? '' : 's'}`}</h2>
+      ${UI.hday ? `<button class="link" data-act="hday" data-v="${UI.hday}">Show all</button>` : total ? `<span class="muted">${fmtLength(total)} total</span>` : ''}</div>
+    ${rows || `<div class="empty">${S.sessions.length ? 'No sessions in this period.' : 'Finished sessions appear here.'}</div>`}`;
 }
 
 function sessionDetailView(id) {
@@ -466,7 +666,7 @@ function sessionDetailView(id) {
   return `
     ${header('Session', { back: '#/history', right: `<button class="btn sm ghost" data-act="editSession" data-id="${s.id}">Edit</button>` })}
     <h2 class="big">${esc(s.name)}</h2>
-    <div class="muted">${fmtDate(s.start, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · ${fmtTime(s.start)}${s.end ? '–' + fmtTime(s.end) : ''}</div>
+    <div class="muted">${fmtDate(s.start, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · ${fmtTime(s.start)}${s.end ? '–' + fmtTime(s.end) : ''}${s.effort ? ` · Effort ${s.effort}/5` : ''}</div>
     <div class="stats">
       <div><span>Actual</span><b>${fmtLength(dur)}</b></div>
       <div><span>Estimated</span><b>${s.estSec ? fmtLength(s.estSec) : '–'}</b></div>
@@ -495,6 +695,7 @@ function editSessionView(id) {
     </div>
     ${sessionItemsHtml(d, 'edit')}
     <button class="btn ghost wide" data-act="pickForSession" data-mode="edit">+ Add exercise</button>
+    ${effortHtml(d, 'edit')}
     <label class="field"><span>Session note</span><textarea class="in" rows="2" data-in="sessNote" data-mode="edit">${esc(d.note)}</textarea></label>
     <button class="btn wide" data-act="saveEdit">Save changes</button>`;
 }
@@ -646,6 +847,11 @@ function settingsView() {
   return `
     ${header('Settings')}
     <section class="card">
+      <h2>Appearance</h2>
+      <div class="chips">${Object.entries(THEMES).map(([k, v]) => `<button class="chip ${(c.theme || 'auto') === k ? 'on' : ''}" data-act="theme" data-v="${k}">${v}</button>`).join('')}</div>
+      <p class="muted">Auto follows your phone’s light/dark setting.</p>
+    </section>
+    <section class="card">
       <h2>Backup</h2>
       <p class="muted">Your data only lives on this phone. Back up to Files / iCloud Drive regularly. Last backup: <b>${S.meta.lastBackup ? fmtDate(S.meta.lastBackup, { day: 'numeric', month: 'short', year: 'numeric' }) : 'never'}</b>.</p>
       <button class="btn wide" data-act="exportJSON">Back up (JSON)</button>
@@ -667,7 +873,19 @@ function settingsView() {
       <p class="muted" id="persist">Checking…</p>
       <p class="muted">${S.sessions.length} sessions · ${S.routines.length} routines · ${S.ex.size} exercises · ${S.weights.length} weigh-ins</p>
     </section>
-    <p class="muted center">Setlog v${APP_VERSION}</p>`;
+    <p class="muted center">${APP_NAME} v${APP_VERSION}</p>`;
+}
+
+function applyTheme() {
+  const t = S.meta.settings?.theme || 'auto';
+  const root = document.documentElement;
+  if (t === 'auto') delete root.dataset.theme; else root.dataset.theme = t;
+  // index.html has two theme-color metas: light first, dark second.
+  const [ml, md] = document.querySelectorAll('meta[name="theme-color"]');
+  if (ml) ml.content = THEME_BG[t === 'dark' ? 'dark' : 'light'];
+  if (md) md.content = THEME_BG[t === 'light' ? 'light' : 'dark'];
+  // Mirrored so index.html can apply it before first paint.
+  try { localStorage.setItem('theme', t); } catch { }
 }
 
 // ---------------- Picker sheet ----------------
@@ -714,11 +932,12 @@ async function deliver(filename, text, mime) {
 }
 async function exportJSON() {
   const data = {
+    // 'setlog' is the internal backup marker; keep it so old and new backups restore alike.
     app: 'setlog', version: 1, exportedAt: new Date().toISOString(),
     exercises: [...S.ex.values()], routines: S.routines, sessions: S.sessions, weights: S.weights,
-    settings: S.meta.settings || {},
+    settings: S.meta.settings || {}, plan: plan(),
   };
-  if (await deliver(`setlog-backup-${localISO()}.json`, JSON.stringify(data), 'application/json')) {
+  if (await deliver(`${FILE_PREFIX}-backup-${localISO()}.json`, JSON.stringify(data), 'application/json')) {
     await setMeta('lastBackup', Date.now());
     toast('Backup created'); rerender();
   }
@@ -727,7 +946,7 @@ const csvCell = v => { if (v === null || v === undefined) return ''; const s = S
 const csv = rows => rows.map(r => r.map(csvCell).join(',')).join('\n');
 function exportSetsCSV() {
   const rows = [['session_id', 'date', 'start_time', 'end_time', 'session_name', 'routine', 'block', 'exercise', 'type', 'modality', 'per_side', 'category', 'set_no',
-    'kg', 'reps', 'time_s', 'watts', 'split_s_per_500m', 'pace_s_per_km', 'cadence_rpm', 'dist_km', 'avg_hr', 'exercise_note', 'session_note']];
+    'kg', 'reps', 'time_s', 'watts', 'split_s_per_500m', 'pace_s_per_km', 'cadence_rpm', 'dist_km', 'avg_hr', 'exercise_note', 'session_note', 'session_effort']];
   for (const s of sessionsDesc().reverse()) {
     const lab = labelsFor(s.items);
     const rname = S.routines.find(r => r.id === s.routineId)?.name || '';
@@ -735,25 +954,26 @@ function exportSetsCSV() {
       const ex = S.ex.get(it.exId) || {};
       it.sets.forEach((st, i) => rows.push([s.id, localISO(new Date(s.start)), fmtTime(s.start), s.end ? fmtTime(s.end) : '', s.name, rname, lab[it.uid],
         ex.name, ex.type, ex.modality || '', ex.perSide ? 1 : 0, ex.category, i + 1,
-        st.kg, st.reps, st.time, st.watts, st.split, st.pace, st.cadence, st.dist, st.hr, it.note, s.note]));
+        st.kg, st.reps, st.time, st.watts, st.split, st.pace, st.cadence, st.dist, st.hr, it.note, s.note, s.effort]));
     }
   }
-  deliver(`setlog-sets-${localISO()}.csv`, csv(rows), 'text/csv');
+  deliver(`${FILE_PREFIX}-sets-${localISO()}.csv`, csv(rows), 'text/csv');
 }
 function exportWeightCSV() {
   const rows = [['date', 'kg'], ...[...S.weights].sort((a, b) => a.date.localeCompare(b.date)).map(w => [w.date, w.kg])];
-  deliver(`setlog-bodyweight-${localISO()}.csv`, csv(rows), 'text/csv');
+  deliver(`${FILE_PREFIX}-bodyweight-${localISO()}.csv`, csv(rows), 'text/csv');
 }
 async function importFile(file) {
   let data;
   try { data = JSON.parse(await file.text()); } catch { return alert('That file isn’t valid JSON.'); }
-  if (data?.app !== 'setlog' || !Array.isArray(data.exercises)) return alert('That doesn’t look like a Setlog backup.');
+  if (data?.app !== 'setlog' || !Array.isArray(data.exercises)) return alert(`That doesn’t look like a ${APP_NAME} backup.`);
   if (!confirm(`Replace ALL data on this phone with the backup from ${data.exportedAt?.slice(0, 10) || 'unknown date'}?\n\n${data.sessions?.length || 0} sessions · ${data.routines?.length || 0} routines · ${data.weights?.length || 0} weigh-ins`)) return;
   await db.replaceAll({
     exercises: data.exercises, routines: data.routines || [], sessions: data.sessions || [], weights: data.weights || [],
-    meta: [{ key: 'settings', value: data.settings || {} }, { key: 'seeded', value: true }, { key: 'firstUse', value: Date.now() }, { key: 'lastBackup', value: Date.now() }],
+    meta: [{ key: 'settings', value: data.settings || {} }, { key: 'plan', value: data.plan || {} }, { key: 'seeded', value: true }, { key: 'firstUse', value: Date.now() }, { key: 'lastBackup', value: Date.now() }],
   });
   await loadAll();
+  applyTheme();
   toast('Backup restored'); go('train');
 }
 
@@ -896,6 +1116,35 @@ const ACT = {
     toast(existed ? 'Updated that day’s entry' : 'Logged'); rerender();
   },
   delWeight: async d => { if (!confirm('Delete this entry?')) return; S.weights = S.weights.filter(w => w.date !== d.v); await db.del('weights', d.v); rerender(); },
+  // week plan
+  wk: d => { const v = +d.v; UI.week = v ? addDays(curMonday(), 7 * v).getTime() : null; UI.pday = null; UI.planAdd = false; rerender(); },
+  pday: d => { UI.pday = d.v; UI.planAdd = false; rerender(); },
+  planAddToggle: () => { UI.planAdd = !UI.planAdd; rerender(); },
+  planAdd: d => {
+    const p = { ...plan() }; p[d.v] = [...(p[d.v] || []), { id: uid(), routineId: d.id }];
+    UI.planAdd = false; savePlan(p); rerender();
+  },
+  planDel: d => {
+    const p = { ...plan() }; p[d.v] = (p[d.v] || []).filter(e => e.id !== d.id);
+    if (!p[d.v].length) delete p[d.v];
+    savePlan(p); rerender();
+  },
+  planCopy: () => copyLastWeek(),
+  planIcs: () => exportWeekIcs(),
+  // history calendar
+  hview: d => { UI.hview = d.v; UI.hday = null; rerender(); },
+  hnav: d => {
+    const v = +d.v; const c = new Date(UI.hcur);
+    if (!v) UI.hcur = Date.now();
+    else if (UI.hview === 'week') UI.hcur = addDays(c, 7 * v).getTime();
+    else if (UI.hview === 'month') UI.hcur = new Date(c.getFullYear(), c.getMonth() + v, 1).getTime();
+    else UI.hcur = new Date(c.getFullYear() + v, c.getMonth(), 1).getTime();
+    UI.hday = null; rerender();
+  },
+  hday: d => { UI.hday = UI.hday === d.v ? null : d.v; rerender(); },
+  hmonth: d => { UI.hview = 'month'; UI.hcur = new Date(new Date(UI.hcur).getFullYear(), +d.v, 1).getTime(); UI.hday = null; rerender(); },
+  effort: d => { const c = ctx(d.mode); const n = +d.v; c.sess.effort = c.sess.effort === n ? null : n; c.save(); rerender(); },
+  theme: d => { setMeta('settings', { ...(S.meta.settings || {}), theme: d.v }); applyTheme(); rerender(); },
   exportJSON: () => exportJSON(),
   exportSetsCSV: () => exportSetsCSV(),
   exportWeightCSV: () => exportWeightCSV(),
@@ -1006,6 +1255,7 @@ async function boot() {
     main().innerHTML = `<div class="empty">Couldn't open storage on this device (${esc(e.message || e)}). If you're in a private browsing tab, open it in a normal tab.</div>`;
     return;
   }
+  applyTheme();
   if (!location.hash) location.replace('#/' + (S.meta.active ? 'session' : 'train'));
   render();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {

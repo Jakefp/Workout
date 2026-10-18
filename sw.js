@@ -1,6 +1,6 @@
 // Offline cache for the app shell. Bump VERSION whenever you change any file,
 // so phones pick up the new version (the app shows an "Update ready" prompt).
-const VERSION = 'setlog-v1.0.0';
+const VERSION = 'workout_jfp-v1.1.0';
 const SHELL = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/app.js', './js/db.js', './js/util.js', './js/chart.js', './js/seed.js',
@@ -8,7 +8,10 @@ const SHELL = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache so a new version never caches stale files.
+  e.waitUntil(caches.open(VERSION)
+    .then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {

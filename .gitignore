@@ -1,0 +1,6 @@
+# Personal data — never commit (public repo)
+setlog-*.json
+workout_jfp-*.json
+*.csv
+*.ics
+.DS_Store

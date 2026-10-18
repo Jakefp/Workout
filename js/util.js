@@ -40,6 +40,15 @@ export function localISO(d = new Date()) {
   return z.toISOString().slice(0, 10);
 }
 
+// Monday 00:00 (local) of the week containing d.
+export function startOfWeek(d = new Date()) {
+  const x = new Date(d); x.setHours(0, 0, 0, 0);
+  x.setDate(x.getDate() - (x.getDay() + 6) % 7);
+  return x;
+}
+// Calendar-day arithmetic in local time, so DST changes don't shift dates.
+export const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+
 export const fmtDate = (ms, opts = { weekday: 'short', day: 'numeric', month: 'short' }) =>
   new Date(ms).toLocaleDateString('en-GB', opts);
 export const fmtTime = ms => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
