@@ -30,6 +30,9 @@ All user data lives in IndexedDB on the phone (DB `setlog`; stores `exercises`, 
 - Use relative paths only (`./`, `js/…`), because the site is served from `/<repo-name>/`. Don't rename the repo: that changes the URL, and the phone would treat it as a new app with empty storage.
 - Never commit backup or export files (`setlog-*.json`, `workout_jfp-*.json`, `*.csv`, `*.ics`). They contain personal data and the repo is public.
 - No network calls, analytics or external CDNs. Everything must work offline.
+- **Units:** store kg, km and seconds per km only. Convert only for display and input, using `prefs` and the helpers in `util.js` (`fmtField`/`parseField`, `fmtLoad`, `fmtBody`, `toDist`, `toPace`). Set fields use kinds `load`, `dist` and `pace` for this. Never write converted values to IndexedDB. CSV exports stay metric.
+- **Pop-ups:** never use `confirm`/`alert`. Use `ask()` / `sure()` / `tell()` in `app.js`, with buttons that say what they do (e.g. "Delete session" / "Keep session").
+- **Week start:** never hard-code Monday. Use `startOfWeek()` and `weekLetters()`, which follow `prefs.weekStart`.
 - Keep the look consistent: colour tokens are on `:root` in `css/app.css`, and the theme is Auto (follows the system) / Light / Dark via `data-theme` on `<html>`, set in Settings. Design for iPhone width first.
 
 ## Testing
@@ -42,7 +45,8 @@ All user data lives in IndexedDB on the phone (DB `setlog`; stores `exercises`, 
 
 - **Exercise:** `{ id, name, type, category, muscles[], perSide, modality, archived, custom }`
   - `type`: weight | bodyweight | hold | stretch | interval | steady
-  - `modality` (cardio only): row | ski | bike | run | other
+  - `modality` (cardio only): row | ski | bike | run | walk | swim | other | general (walk/swim/general added in v1.3.2; walk logs pace, swim and general log time/distance/HR only)
+  - `category`: built-ins are `CATEGORIES` in `seed.js` (Rehab added in v1.3.2), plus user-added `customCats`
 - **Routine:** `{ id, name, created, items: [{ uid, exId, group, target: { sets, reps, time, rest } }] }`
   - Consecutive items with the same `group` form a superset.
 - **Session:** `{ id, routineId, name, start, end, estSec, note, effort, items: [{ uid, exId, group, target, rest, note, sets: [{ id, done, kg, reps, time, watts, split, pace, cadence, dist, hr }] }] }`
@@ -50,8 +54,8 @@ All user data lives in IndexedDB on the phone (DB `setlog`; stores `exercises`, 
   - `effort` (1–5, optional: 1 easy, 3 moderate, 5 all-out) was added in v1.1.0. Older sessions don't have it. It is intended as the intensity input for a future fitness/fatigue chart.
 - **Weight:** `{ date: 'YYYY-MM-DD', kg }`, one per day.
 - **Meta:** `{ key, value }`. Keys: `active` (in-progress session), `settings`, `plan`, `lastBackup`, `firstUse`, `seeded`, `seedVersion` (v1.3.1), `seenVersion` (v1.3.1, last What's new shown).
-- **Settings** (meta `settings`): estimate numbers (`secPerRep`, `minSetSec`, `changeoverSec`), `theme` (auto | light | dark), `catColors` (`{ category: '#rrggbb' }` overrides), `customCats` (user-added category names; built-ins are `CATEGORIES` in `seed.js`).
+- **Settings** (meta `settings`): estimate numbers (`secPerRep`, `minSetSec`, `changeoverSec`), `theme` (auto | light | dark), `units` (`{ load: kg|lb, body: kg|lb|st, dist: km|mi }`, v1.3.2), `weekStart` (mon | sun, default mon, v1.3.2), `catColors` (`{ category: '#rrggbb' }` overrides), `customCats` (user-added category names; built-ins are `CATEGORIES` in `seed.js`).
 - **Personal records** are derived, never stored: `setScore` in `util.js`, `prIndex` in `app.js`.
 - **History shading** is derived: minutes × effort (unrated sessions count as 3), relative to the biggest day of the last 90 days.
-- **Calendar export:** "Open in Calendar" writes the .ics to the local cache `workout_jfp-export` at `./export/week.ics` and navigates there, so the service worker serves it. It never touches the network or the repo.
-- **Plan** (meta `plan`, v1.1.0): `{ 'YYYY-MM-DD': [{ id, routineId }] }`. A planned entry counts as done when a session with that `routineId` starts on that date. It is included in the JSON backup as `plan`.
+- **Calendar export** (the only method; confirmed working on iPhone): "Add week to Calendar" writes the .ics to the local cache `workout_jfp-export` at `./export/week.ics` and navigates there, so the service worker serves it. It never touches the network or the repo.
+- **Plan** (meta `plan`, v1.1.0): `{ 'YYYY-MM-DD': [{ id, routineId, time? }] }`. `time` ('HH:MM', optional, v1.3.2) makes the calendar event timed (start time + routine estimate) instead of all-day. A planned entry counts as done when a session with that `routineId` starts on that date. It is included in the JSON backup as `plan`.

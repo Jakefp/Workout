@@ -38,7 +38,8 @@ All your data lives only on the phone.
   - Step through weeks with ‹ ›.
   - Tap a day, then **+ Plan a routine**. Today's planned routines have a **Start** button, and they're ticked off once you've done them.
   - **Copy last week** repeats last week's plan.
-  - **Add week to Calendar** puts the plan into your calendar app as all-day events.
+  - Tap **+ Time** on a planned routine to give it a time.
+  - **Add week to Calendar** opens your Calendar app with the week's plan. Timed routines appear at their time, lasting as long as the routine's estimate. The others appear as all-day events.
 - **Times:** type `1.30` or `1:30` for 1 minute 30 seconds. The iPhone number pad has no colon, so `.` works as the separator. A bare number means seconds (`45` → 0:45). The exception is steady-cardio duration, where a bare number means minutes (`45` → 45:00).
 - **Logging sets:**
   - Each set is pre-filled from the last time you did that exercise, in any routine.
@@ -55,7 +56,9 @@ All your data lives only on the phone.
   - Week, month and year calendars.
   - Each day is shaded from pale to deep orange by how hard it was (minutes × effort). Coloured dots show which categories you trained.
   - Tap a day to see its sessions.
-- **Categories and colours:** change category colours, or add your own (e.g. CrossFit), in **Settings → Categories**.
+- **Units:** in **Settings → Units**, choose kg or lb for lifting, kg, lb or stone for bodyweight, km or miles for distance, and whether weeks start on Monday or Sunday. Your logged data converts automatically.
+- **Categories and colours:** Strength, Calisthenics, Stretch, Cardio and Rehab (red, for rehab isometrics). Change colours, or add your own categories (e.g. CrossFit), in **Settings → Categories**.
+- **New exercises:** use **Exercises → + New**, or **+ New exercise** while building a routine. You can also search in the Add exercises list and tap **+ Create**. Each exercise needs a unique name.
 - **Bodyweight exercises:** use **± kg** for added load (`+10`) or band/machine assistance (`-15`). Leave it blank for pure bodyweight.
 - **Supersets:**
   - In a routine or session, tap **⋯ → Superset with next**. Paired exercises show as A1/A2, and the rest applies after each round.

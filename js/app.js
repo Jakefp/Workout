@@ -5,11 +5,12 @@ import {
   uid, esc, DAY, parseDur, fmtDur, fmtLength, localISO, startOfWeek, addDays, fmtDate, fmtTime, num,
   TYPES, MODALITIES, isCardio, fieldsFor, fmtField, summariseSet, setLabel,
   defaultTarget, targetFields, setFromTarget, blocks, estimateSec, metricsFor, rollingMean, setScore,
+  prefs, parseField, fmtBody, fmtBodyDelta, toBody, kgFromStLb, weekLetters,
 } from './util.js';
 
 const APP_NAME = 'Workout_jfp';
 const FILE_PREFIX = 'workout_jfp';
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.3.2';
 const DEFAULT_CFG = { secPerRep: 3, minSetSec: 20, changeoverSec: 60 };
 const BACKUP_DAYS = 14;
 const THEMES = { auto: 'Auto', light: 'Light', dark: 'Dark' };
@@ -26,15 +27,64 @@ const UI = {
 
 // Shown once after updating to this version (and from Settings → What's new).
 const WHATS_NEW = [
-  ['🥇', 'Personal records', 'Your best-ever set gets a gold highlight in History and on the exercise page, and flashes gold live when you beat it. Weights count kg × reps; intervals count watts × minutes.'],
-  ['🔥', 'Training heat in History', 'Calendar days are shaded from light to deep orange by how hard they were: minutes trained × effort.'],
-  ['🎨', 'Category colours', 'Coloured dots next to exercises and routines. Change the colours, or add your own categories, in Settings.'],
-  ['📈', 'More exercise charts', 'Switch between Max weight, Volume and Total reps.'],
-  ['💾', 'Save routine', 'Save a routine without starting it.'],
-  ['🗓️', 'Calendar export', 'New ways to get your week plan into your calendar app.'],
-  ['⚙️', 'Updates in Settings', 'Check for updates and reopen this list any time.'],
+  ['➕', '270+ new exercises', 'Including swimming, hiking, boxing and other cardio, plus a new red Rehab category for isometric holds.'],
+  ['📏', 'Your units', 'Choose kg or lb for lifting, kg, lb or stone for bodyweight, km or miles for distance, and whether weeks start on Monday or Sunday. Find them in Settings → Units.'],
+  ['⏰', 'Times in your week plan', 'Give a planned routine a time and it goes into your calendar at that time instead of as an all-day event.'],
+  ['🗓️', 'Add to Calendar in one tap', 'Add week to Calendar now goes straight to your Calendar app.'],
+  ['🆕', 'New exercises while building', 'Create an exercise from the Add exercises list. Names that already exist are flagged.'],
+  ['💬', 'Clearer choices', 'Pop-ups now say what each button does. For example, finishing a changed routine lets you update it, save it as a new routine, or keep the change as a one-off.'],
 ];
 const cfg = () => ({ ...DEFAULT_CFG, ...(S.meta.settings || {}) });
+const setSettings = patch => setMeta('settings', { ...(S.meta.settings || {}), ...patch });
+// Copy unit / week-start settings into util's prefs, which formatting and parsing read.
+function applyPrefs() {
+  const u = cfg().units || {};
+  prefs.load = u.load === 'lb' ? 'lb' : 'kg';
+  prefs.body = ['lb', 'st'].includes(u.body) ? u.body : 'kg';
+  prefs.dist = u.dist === 'mi' ? 'mi' : 'km';
+  prefs.weekStart = cfg().weekStart === 'sun' ? 0 : 1;
+}
+
+// ---------------- Dialogs ----------------
+// In-app replacement for confirm/alert with buttons that say what they do.
+// buttons: [{ label, value, style: 'primary' | 'ghost' | 'danger', needsText }]
+// input: { value, placeholder } adds a text field; the result is then { value, text }.
+// Resolves to the chosen value, or null if dismissed by tapping outside.
+function ask({ title, message = '', buttons, input = null }) {
+  return new Promise(resolve => {
+    const el = document.getElementById('dialog');
+    el.innerHTML = `<div class="scrim" data-dlg="x"></div>
+      <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dlg-t">
+        <h3 id="dlg-t">${esc(title)}</h3>
+        ${message ? `<p class="dlg-msg">${esc(message)}</p>` : ''}
+        ${input ? `<input class="in" id="dlg-in" maxlength="60" value="${esc(input.value || '')}" placeholder="${esc(input.placeholder || '')}">` : ''}
+        <div class="dlg-btns">${buttons.map((b, i) => `<button class="btn ${b.style === 'danger' ? 'danger' : b.style === 'primary' ? '' : 'ghost'}" data-dlg="${i}">${esc(b.label)}</button>`).join('')}</div>
+      </div>`;
+    el.classList.add('open'); document.body.classList.add('noscroll');
+    const inp = el.querySelector('#dlg-in');
+    if (inp) setTimeout(() => { inp.focus(); inp.select(); }, 50);
+    const finish = v => {
+      el.removeEventListener('click', onClick);
+      el.classList.remove('open'); el.innerHTML = '';
+      if (!document.querySelector('#sheet.open')) document.body.classList.remove('noscroll');
+      resolve(v);
+    };
+    const onClick = ev => {
+      const b = ev.target.closest('[data-dlg]'); if (!b) return;
+      ev.preventDefault(); ev.stopPropagation();
+      if (b.dataset.dlg === 'x') return finish(null);
+      const btn = buttons[+b.dataset.dlg];
+      if (inp && btn.needsText && !inp.value.trim()) { inp.focus(); return; }
+      finish(inp ? { value: btn.value, text: inp.value.trim() } : btn.value);
+    };
+    el.addEventListener('click', onClick);
+  });
+}
+// Information only: one button.
+const tell = (title, message = '') => ask({ title, message, buttons: [{ label: 'Got it', value: true, style: 'primary' }] });
+// Yes/no with explicit labels; resolves true only for the first button.
+const sure = async (title, message, yes, no = 'Cancel', danger = true) =>
+  await ask({ title, message, buttons: [{ label: yes, value: true, style: danger ? 'danger' : 'primary' }, { label: no, value: false }] }) === true;
 // Weekly plan, stored in meta 'plan': { 'YYYY-MM-DD': [{ id, routineId }] }
 const plan = () => S.meta.plan || {};
 const savePlan = p => setMeta('plan', p);
@@ -130,8 +180,8 @@ function prIndex(excludeId, minSessions = 2) {
 
 // ---------------- Categories & colours ----------------
 // Built-in categories plus any the user added in Settings (settings.customCats).
-const cats = () => [...CATEGORIES, ...(cfg().customCats || [])];
-const DEFAULT_CAT_HEX = { Strength: '#e2531c', Calisthenics: '#2f6fd6', Stretch: '#8a5cc7', Cardio: '#14968a' };
+const cats = () => [...new Set([...CATEGORIES, ...(cfg().customCats || [])])];
+const DEFAULT_CAT_HEX = { Strength: '#e2531c', Calisthenics: '#2f6fd6', Stretch: '#8a5cc7', Cardio: '#14968a', Rehab: '#d42a2a' };
 const CUSTOM_HEX = ['#d4a017', '#c2378a', '#5b8c2a', '#0f7fbf', '#7a6a58'];
 const customHex = c => CUSTOM_HEX[Math.max(0, (cfg().customCats || []).indexOf(c)) % CUSTOM_HEX.length];
 // Hex for the colour picker; overrides live in settings.catColors.
@@ -239,9 +289,20 @@ function newSessionItem(ex, target, group = null) {
   return { uid: uid(), exId: ex.id, group, target: t, rest: num(t.rest) || 0, note: '', sets };
 }
 
-function startSession(routineId) {
+async function startSession(routineId) {
   if (S.meta.active) {
-    if (!confirm('A session is already in progress.\n\nOK: discard it and start this one\nCancel: go back to it')) return go('session');
+    const a = S.meta.active;
+    const choice = await ask({
+      title: 'A session is already in progress',
+      message: `“${a.name}” started at ${fmtTime(a.start)} and hasn’t been finished.`,
+      buttons: [
+        { label: `Go back to “${a.name}”`, value: 'resume', style: 'primary' },
+        { label: 'Discard it and start the new one', value: 'discard', style: 'danger' },
+        { label: 'Cancel', value: null },
+      ],
+    });
+    if (choice === 'resume') return go('session');
+    if (choice !== 'discard') return;
   }
   const r = S.routines.find(x => x.id === routineId);
   const sess = {
@@ -262,21 +323,63 @@ async function finishSession() {
   const sess = S.meta.active;
   const doneCount = sess.items.reduce((n, it) => n + it.sets.filter(s => s.done).length, 0);
   if (!doneCount) {
-    if (confirm('No sets are ticked, so there is nothing to save.\n\nDiscard this session?')) await discardSession(true);
+    const c = await ask({
+      title: 'Nothing to save yet',
+      message: 'No sets are ticked. Tick the sets you did, or discard this session.',
+      buttons: [{ label: 'Keep logging', value: false, style: 'primary' }, { label: 'Discard session', value: true, style: 'danger' }],
+    });
+    if (c === true) await discardSession(true);
     return;
   }
-  if (!confirm('Finish and save this session? Unticked sets will be dropped.')) return;
-  const estSec = sessionEst(sess);
-  // Offer to update the routine if the structure changed.
+  const undone = sess.items.reduce((n, it) => n + it.sets.filter(s => !s.done).length, 0);
+  const dropNote = undone ? `${undone} unticked set${undone === 1 ? '' : 's'} will be left out.` : '';
   const r = sess.routineId && S.routines.find(x => x.id === sess.routineId);
-  if (r) {
-    const asRoutine = sess.items.map(it => ({ uid: it.uid, exId: it.exId, group: it.group, target: { ...it.target, sets: it.sets.length, rest: it.rest } }));
-    if (signature(asRoutine) !== signature(r.items) &&
-      confirm(`You changed this session compared with “${r.name}”.\n\nOK: save the changes to the routine\nCancel: keep the routine as it was`)) {
-      r.items = asRoutine.map(it => ({ ...it, uid: uid() }));
-      await putRoutine(r);
-    }
+  const asRoutine = sess.items.map(it => ({ uid: it.uid, exId: it.exId, group: it.group, target: { ...it.target, sets: it.sets.length, rest: it.rest } }));
+  const changed = r && signature(asRoutine) !== signature(r.items);
+  const choice = changed
+    ? await ask({
+      title: `You changed “${r.name}”`,
+      message: `This session differs from the routine (exercises, order, sets or targets). How should it be saved?${dropNote ? '\n\n' + dropNote : ''}`,
+      buttons: [
+        { label: `Update “${r.name}” going forward`, value: 'update', style: 'primary' },
+        { label: 'Save as a new routine…', value: 'new' },
+        { label: 'Just this once (routines stay as they are)', value: 'once' },
+        { label: 'Keep logging', value: null },
+      ],
+    })
+    : await ask({
+      title: 'Finish and save this session?',
+      message: dropNote || 'Everything you ticked will be saved to History.',
+      buttons: [
+        { label: 'Finish and save', value: 'once', style: 'primary' },
+        ...(r ? [] : [{ label: 'Finish and save as a routine…', value: 'new' }]),
+        { label: 'Keep logging', value: null },
+      ],
+    });
+  if (!choice) return;
+  let saveMsg = 'Session saved';
+  if (choice === 'update') {
+    r.items = asRoutine.map(it => ({ ...it, uid: uid() }));
+    await putRoutine(r);
+    saveMsg = `Session saved · “${r.name}” updated`;
   }
+  if (choice === 'new') {
+    const res = await ask({
+      title: 'Name the new routine',
+      message: r ? `“${r.name}” stays as it was. The new routine appears on Train.` : 'It appears on Train, ready to start next time.',
+      input: { value: r ? `${r.name} (variation)` : (sess.name === 'Workout' ? '' : sess.name), placeholder: 'e.g. Upper body B' },
+      buttons: [{ label: 'Save routine and finish', value: 'save', style: 'primary', needsText: true }, { label: 'Back', value: null }],
+    });
+    if (!res || res.value !== 'save') return finishSession();
+    const nr = { id: uid(), name: res.text, created: Date.now(), items: asRoutine.map(it => ({ ...it, uid: uid() })) };
+    tidyGroups(nr.items);
+    await putRoutine(nr);
+    // A routine-less session now belongs to its new routine; a changed routine's session stays
+    // linked to the original so the week plan still counts it as done.
+    if (!r) { sess.routineId = nr.id; sess.name = nr.name; }
+    saveMsg = `Session saved · new routine “${nr.name}”`;
+  }
+  const estSec = sessionEst(sess);
   const saved = {
     ...sess, end: Date.now(), estSec,
     items: sess.items.map(it => ({ ...it, sets: it.sets.filter(s => s.done).map(({ touched, ...s }) => s) }))
@@ -286,11 +389,11 @@ async function finishSession() {
   await putSession(saved);
   await setMeta('active', undefined);
   try { navigator.storage?.persist?.(); } catch { }
-  toast('Session saved');
+  toast(saveMsg);
   location.replace('#/history/' + saved.id);
 }
 async function discardSession(skipConfirm) {
-  if (!skipConfirm && !confirm('Discard this session? Nothing from it will be saved.')) return;
+  if (!skipConfirm && !await sure('Discard this session?', 'Nothing from it will be saved, including ticked sets.', 'Discard session', 'Keep logging')) return;
   clearTimeout(timers.active);
   await setMeta('active', undefined);
   go('train');
@@ -324,7 +427,12 @@ function render(keepScroll = false) {
   if (keepScroll) window.scrollTo(0, y);
 }
 const rerender = () => render(true);
-window.addEventListener('hashchange', () => { UI.menu = null; render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => {
+  UI.menu = null;
+  // Leaving the exercise form drops its unsaved draft and any "add to routine" hand-off.
+  if (route().name !== 'exercise-edit') { UI.exDraft = null; UI.newEx = null; }
+  render(); window.scrollTo(0, 0);
+});
 
 // ---------------- Shared bits ----------------
 const header = (title, { back, right = '' } = {}) => `
@@ -379,6 +487,10 @@ function trainView() {
 }
 
 const curMonday = () => startOfWeek(UI.week ? new Date(UI.week) : new Date());
+// A day's planned entries, timed ones first in time order, then untimed in the order added.
+const planDay = (p, iso) => (p[iso] || []).map((e, i) => ({ e, i }))
+  .sort((a, b) => (a.e.time ? 0 : 1) - (b.e.time ? 0 : 1) || (a.e.time || '').localeCompare(b.e.time || '') || a.i - b.i)
+  .map(x => x.e);
 const weekIsos = mon => [...Array(7)].map((_, i) => localISO(addDays(mon, i)));
 const longDay = iso => fmtDate(new Date(iso + 'T12:00:00'), { weekday: 'long', day: 'numeric', month: 'long' });
 
@@ -389,7 +501,7 @@ function weekHtml() {
   const sel = isos.includes(UI.pday) ? UI.pday : isos.includes(today) ? today : isos[0];
   const byDay = sessionsByDay();
   const p = plan();
-  const st = Object.fromEntries(isos.map(iso => [iso, planStatus(p[iso] || [], byDay.get(iso) || [])]));
+  const st = Object.fromEntries(isos.map(iso => [iso, planStatus(planDay(p, iso), byDay.get(iso) || [])]));
   const thisWeek = isos.includes(today);
   const label = thisWeek ? 'This week'
     : `${fmtDate(mon, { day: 'numeric', month: 'short' })} – ${fmtDate(addDays(mon, 6), { day: 'numeric', month: 'short' })}`;
@@ -411,6 +523,8 @@ function weekHtml() {
       return `<div class="plan-row"><span class="pchk"><i class="pip ${sel < today ? 'missed' : ''}"></i></span>
         ${r ? `<a class="grow" href="#/routine/${r.id}"><span class="item-name">${esc(r.name)}<span class="rdots">${catDotsFor(r.items)}</span></span><span class="muted">~${fmtLength(routineEst(r))}</span></a>`
           : `<span class="grow muted">Deleted routine</span>`}
+        <label class="ptime${e.time ? ' set' : ''}"><span>${e.time ? esc(e.time) : '+ Time'}</span>
+          <input type="time" value="${esc(e.time || '')}" data-ch="planTime" data-v="${sel}" data-id="${e.id}" aria-label="Time for ${esc(r?.name || 'routine')}"></label>
         ${r && sel === today && r.items.length ? `<button class="btn sm" data-act="start" data-id="${r.id}">Start</button>` : ''}
         <button class="icon" data-act="planDel" data-v="${sel}" data-id="${e.id}" aria-label="Remove from plan">✕</button></div>`;
     }),
@@ -438,21 +552,21 @@ function weekHtml() {
   </section>`;
 }
 
-function copyLastWeek() {
+async function copyLastWeek() {
   const mon = curMonday();
   const src = weekIsos(addDays(mon, -7)), dst = weekIsos(mon);
   const p = { ...plan() };
   const n = src.reduce((k, iso) => k + (p[iso]?.length || 0), 0);
   if (!n) return toast('Last week has no plan to copy');
-  if (dst.some(iso => p[iso]?.length) && !confirm('Replace this week’s plan with last week’s?')) return;
+  if (dst.some(iso => p[iso]?.length) && !await sure('This week already has a plan', 'Copying replaces it with last week’s plan, including times.', 'Replace with last week’s plan', 'Keep this week’s plan')) return;
   dst.forEach((iso, i) => {
-    const e = (p[src[i]] || []).map(x => ({ id: uid(), routineId: x.routineId }));
+    const e = (p[src[i]] || []).map(x => ({ id: uid(), routineId: x.routineId, ...(x.time ? { time: x.time } : {}) }));
     if (e.length) p[iso] = e; else delete p[iso];
   });
   savePlan(p); toast(`Copied ${n} planned session${n === 1 ? '' : 's'}`); rerender();
 }
 
-// One-way export of the visible week's plan as all-day calendar events.
+// One-way export of the visible week's plan: timed events where a time is set, otherwise all-day.
 const icsText = s => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
 const icsFold = line => { let out = ''; while (line.length > 74) { out += line.slice(0, 74) + '\r\n '; line = line.slice(74); } return out + line; };
 function buildWeekIcs() {
@@ -466,9 +580,19 @@ function buildWeekIcs() {
       const r = S.routines.find(x => x.id === e.routineId);
       if (!r) continue;
       const exNames = r.items.map(it => S.ex.get(it.exId)?.name).filter(Boolean);
-      lines.push('BEGIN:VEVENT', `UID:${e.id}@workout-jfp`, `DTSTAMP:${stamp}`,
-        `DTSTART;VALUE=DATE:${iso.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${next.replace(/-/g, '')}`,
-        `SUMMARY:${icsText(r.name)}`, 'TRANSP:TRANSPARENT', `DESCRIPTION:${icsText([`~${fmtLength(routineEst(r))}`, ...exNames].join('\n'))}`, 'END:VEVENT');
+      // Timed events use floating local time (no time zone), which calendars show as the phone's local time.
+      const when = e.time
+        ? (() => {
+          const [h, m] = e.time.split(':').map(Number);
+          const start = new Date(iso + 'T00:00:00'); start.setHours(h, m, 0, 0);
+          const mins = Math.max(15, Math.ceil(routineEst(r) / 60 / 5) * 5);
+          const end = new Date(start.getTime() + mins * 60000);
+          const f = d => `${localISO(d).replace(/-/g, '')}T${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}00`;
+          return [`DTSTART:${f(start)}`, `DTEND:${f(end)}`];
+        })()
+        : [`DTSTART;VALUE=DATE:${iso.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${next.replace(/-/g, '')}`, 'TRANSP:TRANSPARENT'];
+      lines.push('BEGIN:VEVENT', `UID:${e.id}@workout-jfp`, `DTSTAMP:${stamp}`, ...when,
+        `SUMMARY:${icsText(r.name)}`, `DESCRIPTION:${icsText([`~${fmtLength(routineEst(r))}`, ...exNames].join('\n'))}`, 'END:VEVENT');
     }
   }
   if (!lines.length) return null;
@@ -476,23 +600,19 @@ function buildWeekIcs() {
     .map(icsFold).join('\r\n') + '\r\n';
   return { name: `${FILE_PREFIX}-week-${localISO(mon)}.ics`, text };
 }
-// Three ways to hand the .ics to the phone (which one works best varies by device):
-//  open:  store it in the local cache and navigate to it, so the service worker serves it as a
-//         real text/calendar page (iOS then shows its "Add events" screen). Nothing leaves the phone.
-//  share: the share sheet / download (Save to Files, or pick a calendar app on Android).
-//  data:  navigate to a data: URL holding the file.
+// Store the .ics in the local cache and navigate to it, so the service worker serves it as a real
+// text/calendar page: iOS then shows its "Add events" screen (tested and confirmed on iPhone), and
+// Android hands it to a calendar app. Nothing leaves the phone. Without a service worker
+// (e.g. a plain browser tab on a computer) it falls back to a download.
 const ICS_URL = './export/week.ics';
-async function calExport(how) {
+async function calExport() {
   const ics = buildWeekIcs();
   if (!ics) return toast('Nothing planned this week');
-  if (how === 'share') { closeSheet(); return deliver(ics.name, ics.text, 'text/calendar'); }
-  if (how === 'data') { location.href = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(ics.text); return; }
-  if (!('caches' in window) || !navigator.serviceWorker?.controller) return alert('This option needs the installed app. Try Share / Save to Files instead.');
+  if (!('caches' in window) || !navigator.serviceWorker?.controller) return deliver(ics.name, ics.text, 'text/calendar');
   const cache = await caches.open(`${FILE_PREFIX}-export`);
   await cache.put(new URL(ICS_URL, location.href).href, new Response(ics.text, {
     headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': `inline; filename="${ics.name}"` },
   }));
-  closeSheet();
   location.href = ICS_URL;
 }
 
@@ -515,7 +635,10 @@ function routineView(id) {
     <input class="title-in" data-in="rtName" data-rid="${r.id}" value="${esc(r.name)}" placeholder="Routine name" aria-label="Routine name">
     <div class="est"><span class="muted">Estimated length</span> <b id="est">~${fmtLength(routineEst(r))}</b></div>
     ${body || `<div class="empty">Add the exercises for this routine. Targets and rest are set per exercise.</div>`}
-    <button class="btn ghost wide" data-act="pickForRoutine" data-rid="${r.id}">+ Add exercises</button>
+    <div class="two add-two">
+      <button class="btn ghost" data-act="pickForRoutine" data-rid="${r.id}">+ Add exercises</button>
+      <button class="btn ghost" data-act="newExForRoutine" data-rid="${r.id}">+ New exercise</button>
+    </div>
     <button class="btn wide" data-act="saveRoutine" data-rid="${r.id}">Save routine</button>
     <p class="muted center">Changes save as you go. Start it any time from Train.</p>
     <div class="danger-zone"><button class="link danger" data-act="deleteRoutine" data-rid="${r.id}">Delete routine</button></div>`;
@@ -699,7 +822,7 @@ function historyCalendar(byDay, a, b) {
     const y = a.getFullYear();
     return `<div class="years">${[...Array(12)].map((_, m) => {
       const first = new Date(y, m, 1);
-      const lead = (first.getDay() + 6) % 7;
+      const lead = (first.getDay() - prefs.weekStart + 7) % 7;
       const len = new Date(y, m + 1, 0).getDate();
       const cells = '<i class="blank"></i>'.repeat(lead) + [...Array(len)].map((_, i) => {
         const ss = byDay.get(localISO(new Date(y, m, i + 1)));
@@ -710,7 +833,7 @@ function historyCalendar(byDay, a, b) {
   }
   const days = [];
   for (let d = startOfWeek(a); d < b || days.length % 7; d = addDays(d, 1)) days.push(d);
-  return `<div class="cal">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map(x => `<span class="cal-h">${x}</span>`).join('')}${days.map(d => {
+  return `<div class="cal">${weekLetters().map(x => `<span class="cal-h">${x}</span>`).join('')}${days.map(d => {
     const iso = localISO(d); const ss = byDay.get(iso);
     const h = ss ? heat(ss, ref) : 0;
     return `<button class="cday${ss ? ' hot' : ''}${h > 55 ? ' deep' : ''}${d < a || d >= b ? ' out' : ''}${iso === today ? ' today' : ''}${iso === UI.hday ? ' on' : ''}" data-act="hday" data-v="${iso}" ${ss ? heatStyle(ss) : 'disabled'}>
@@ -900,9 +1023,12 @@ function exerciseEditView(id) {
   }
   const d = UI.exDraft;
   const used = !isNew && usage(d.id) > 0;
+  const back = isNew ? (UI.newEx?.back || '#/exercises') : '#/exercise/' + id;
   return `
-    ${header(isNew ? 'New exercise' : 'Edit exercise', { back: isNew ? '#/exercises' : '#/exercise/' + id })}
-    <label class="field"><span>Name</span><input class="in" data-in="exName" value="${esc(d.name)}" placeholder="e.g. Ring Dip"></label>
+    ${header(isNew ? 'New exercise' : 'Edit exercise', { back })}
+    ${isNew && UI.newEx ? `<p class="muted">${esc(UI.newEx.note)}</p>` : ''}
+    <label class="field"><span>Name</span><input class="in" data-in="exName" value="${esc(d.name)}" placeholder="e.g. Ring Dip">
+      <small class="name-note" id="exNameNote">${esc(nameProblem(d) || '')}</small></label>
     <label class="field"><span>How it's logged</span>
       <select class="in" data-ch="exType" ${used ? 'disabled' : ''}>${Object.entries(TYPES).map(([k, v]) => `<option value="${k}" ${d.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
       ${used ? `<small class="muted">Locked because this exercise has logged sessions.</small>` : ''}</label>
@@ -914,7 +1040,23 @@ function exerciseEditView(id) {
       <small class="muted">Add your own categories in Settings.</small></label>
     <div class="field"><span>Muscle groups</span>
       <div class="chips">${MUSCLES.map(m => `<button class="chip ${d.muscles.includes(m) ? 'on' : ''}" data-act="exMus" data-v="${m}">${m}</button>`).join('')}</div></div>
-    <button class="btn wide" data-act="saveEx">Save exercise</button>`;
+    <button class="btn wide" data-act="saveEx" id="saveExBtn" ${nameProblem(d) ? 'disabled' : ''}>${isNew && UI.newEx ? UI.newEx.saveLabel : 'Save exercise'}</button>`;
+}
+// Why an exercise name can't be saved (empty, or the same as another exercise), or ''.
+function nameProblem(d) {
+  const n = d.name.trim().toLowerCase();
+  if (!n) return 'Give the exercise a name.';
+  const dup = exList().find(e => e.id !== d.id && e.name.trim().toLowerCase() === n);
+  return dup ? `“${dup.name}” already exists${dup.archived ? ' (archived)' : ''}. Choose a different name, or use the existing exercise.` : '';
+}
+// Open the new-exercise form from a routine or session; on save the exercise is added there.
+function newExerciseFor({ back, note, saveLabel, onCreate, name = '', category }) {
+  UI.newEx = { back, note, saveLabel, onCreate };
+  UI.exDraft = { id: uid(), name, type: 'weight', category: category && category !== 'All' ? category : 'Strength', muscles: [], perSide: false, modality: null, archived: false, custom: true, _for: 'new' };
+  if (category === 'Cardio') { UI.exDraft.type = 'steady'; UI.exDraft.modality = 'run'; UI.exDraft.muscles = ['Cardio']; }
+  if (category === 'Stretch') UI.exDraft.type = 'stretch';
+  if (category === 'Rehab') UI.exDraft.type = 'hold';
+  location.hash = '#/exercise-edit/new';
 }
 
 // ---------------- Weight ----------------
@@ -928,24 +1070,31 @@ function weightView() {
   const avgNow = roll[roll.length - 1]?.y;
   const weekAgo = roll.filter(p => p.x <= Date.now() - 7 * DAY).pop();
   const change = avgNow && weekAgo ? avgNow - weekAgo.y : null;
+  // Charts plot in the chosen unit (stone as a decimal, labelled as st + lb).
+  const yFmt = prefs.body === 'st' ? v => { const st = Math.floor(v); return `${st} st ${Math.round((v - st) * 14)}`; } : v => `${Math.round(v * 10) / 10}`;
   onMount(() => renderChart(document.getElementById('wchart'), {
     series: [
-      { name: 'Daily', points: inRange.map(w => ({ x: new Date(w.date + 'T12:00:00').getTime(), y: w.kg, label: `${w.kg.toFixed(1)} kg` })), mark: 'dots', tone: 'muted' },
-      { name: '7-day average', points: roll.filter(p => p.x >= cutoff).map(p => ({ ...p, label: `${p.y.toFixed(1)} kg` })), mark: 'line', tone: 'accent' },
+      { name: 'Daily', points: inRange.map(w => ({ x: new Date(w.date + 'T12:00:00').getTime(), y: toBody(w.kg), label: fmtBody(w.kg) })), mark: 'dots', tone: 'muted' },
+      { name: '7-day average', points: roll.filter(p => p.x >= cutoff).map(p => ({ x: p.x, y: toBody(p.y), label: fmtBody(p.y) })), mark: 'line', tone: 'accent' },
     ],
-    yFmt: v => `${Math.round(v * 10) / 10}`,
+    yFmt,
   }));
+  const ph = latest ? (prefs.body === 'st' ? null : toBody(latest.kg).toFixed(1)) : (prefs.body === 'lb' ? '165.0' : '75.0');
+  const stPh = latest ? fmtBody(latest.kg).match(/^(\d+) st ([\d.]+)/) : null;
   return `
     ${header('Bodyweight')}
-    <div class="card weigh">
-      <label class="tf"><span>kg</span><input class="in big-in" id="wkg" inputmode="decimal" placeholder="${latest ? latest.kg : '75.0'}"></label>
+    <div class="card weigh${prefs.body === 'st' ? ' st' : ''}">
+      ${prefs.body === 'st'
+      ? `<label class="tf"><span>st</span><input class="in big-in" id="wst" inputmode="decimal" placeholder="${stPh ? stPh[1] : '12'}"></label>
+         <label class="tf"><span>lb</span><input class="in big-in" id="wlb" inputmode="decimal" placeholder="${stPh ? stPh[2] : '0'}"></label>`
+      : `<label class="tf"><span>${prefs.body}</span><input class="in big-in" id="wkg" inputmode="decimal" placeholder="${ph}"></label>`}
       <label class="tf"><span>Date</span><input class="in" id="wdate" type="date" value="${localISO()}" max="${localISO()}"></label>
       <button class="btn" data-act="saveWeight">Log</button>
     </div>
     ${latest ? `<div class="stats">
-      <div><span>Latest</span><b>${latest.kg.toFixed(1)} kg</b><small>${fmtDate(new Date(latest.date + 'T12:00:00'), { day: 'numeric', month: 'short' })}</small></div>
-      <div><span>7-day avg</span><b>${avgNow.toFixed(1)} kg</b></div>
-      <div><span>vs last week</span><b>${change === null ? '–' : (change > 0 ? '+' : '') + change.toFixed(1) + ' kg'}</b></div>
+      <div><span>Latest</span><b>${fmtBody(latest.kg)}</b><small>${fmtDate(new Date(latest.date + 'T12:00:00'), { day: 'numeric', month: 'short' })}</small></div>
+      <div><span>7-day avg</span><b>${fmtBody(avgNow)}</b></div>
+      <div><span>vs last week</span><b>${change === null ? '–' : fmtBodyDelta(change)}</b></div>
     </div>` : ''}
     <section class="card">
       <div class="chips">${Object.keys(RANGES).map(r => `<button class="chip ${UI.wrange === r ? 'on' : ''}" data-act="wrange" data-v="${r}">${r}</button>`).join('')}</div>
@@ -953,11 +1102,13 @@ function weightView() {
     </section>
     <section><div class="sec-h"><h2>Entries</h2></div>
       ${inRange.map(w => `<div class="card row"><div class="grow">${fmtDate(new Date(w.date + 'T12:00:00'), { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</div>
-        <b>${w.kg.toFixed(1)} kg</b><button class="icon" data-act="delWeight" data-v="${w.date}" aria-label="Delete entry">✕</button></div>`).join('') || `<div class="empty">No entries in this range.</div>`}
+        <b>${fmtBody(w.kg)}</b><button class="icon" data-act="delWeight" data-v="${w.date}" aria-label="Delete entry">✕</button></div>`).join('') || `<div class="empty">No entries in this range.</div>`}
     </section>`;
 }
 
 // ---------------- Settings ----------------
+const unitRow = (label, key, opts, cur) => `<div class="unit-row"><span>${label}</span>
+  <div class="seg">${Object.entries(opts).map(([k, v]) => `<button class="${cur === k ? 'on' : ''}" data-act="unit" data-k="${key}" data-v="${k}" aria-pressed="${cur === k}">${v}</button>`).join('')}</div></div>`;
 function settingsView() {
   const c = cfg();
   onMount(async () => {
@@ -970,6 +1121,14 @@ function settingsView() {
       <h2>Appearance</h2>
       <div class="chips">${Object.entries(THEMES).map(([k, v]) => `<button class="chip ${(c.theme || 'auto') === k ? 'on' : ''}" data-act="theme" data-v="${k}">${v}</button>`).join('')}</div>
       <p class="muted">Auto follows your phone’s light/dark setting.</p>
+    </section>
+    <section class="card">
+      <h2>Units</h2>
+      ${unitRow('Lifting weights', 'load', { kg: 'kg', lb: 'lb' }, prefs.load)}
+      ${unitRow('Bodyweight', 'body', { kg: 'kg', lb: 'lb', st: 'st & lb' }, prefs.body)}
+      ${unitRow('Distance', 'dist', { km: 'km', mi: 'miles' }, prefs.dist)}
+      ${unitRow('Week starts on', 'week', { mon: 'Monday', sun: 'Sunday' }, prefs.weekStart ? 'mon' : 'sun')}
+      <p class="muted">Only changes how numbers are shown and typed. Everything already logged converts automatically, and exports stay in kg and km.</p>
     </section>
     <section class="card">
       <h2>Categories</h2>
@@ -1071,8 +1230,14 @@ function pickerList() {
     (!p.mus || (e.muscles || []).includes(p.mus)) && (!q || e.name.toLowerCase().includes(q)));
   return list.map(e => `<button class="pick ${p.sel.has(e.id) ? 'on' : ''}" data-act="pick" data-id="${e.id}">
       <span class="grow"><span class="item-name">${exDot(e)}${esc(e.name)}</span><span class="muted">${esc(TYPES[e.type])}${e.muscles?.length ? ' · ' + esc(e.muscles.join(', ')) : ''}</span></span>
-      <span class="check">${p.sel.has(e.id) ? '✓' : ''}</span></button>`).join('') || `<div class="empty">No matches. <a href="#/exercise-edit/new" data-act="closeSheet">Create an exercise</a></div>`;
+      <span class="check">${p.sel.has(e.id) ? '✓' : ''}</span></button>`).join('')
+    || `<div class="empty">No exercise called “${esc(p.q.trim())}” yet.</div>`;
 }
+const pickerCreate = () => {
+  const q = UI.picker.q.trim();
+  return `<button class="pick create" data-act="pickNew"><span class="grow"><span class="item-name">+ Create ${q ? `“${esc(q)}”` : 'a new exercise'}</span>
+    <span class="muted">${UI.picker.multi ? 'It’s added straight away' : 'It’s swapped in straight away'}</span></span></button>`;
+};
 function sheetFrame(title, body) {
   return `<div class="scrim" data-act="closeSheet"></div>
     <div class="sheet" role="dialog" aria-label="${esc(title)}">
@@ -1083,14 +1248,6 @@ function sheetFrame(title, body) {
 const newsHtml = () => sheetFrame(`What’s new in v${APP_VERSION}`, `
   ${WHATS_NEW.map(([icon, t, d]) => `<div class="news"><span class="news-i" aria-hidden="true">${icon}</span><div><b>${esc(t)}</b><p class="muted">${esc(d)}</p></div></div>`).join('')}
   <button class="btn wide" data-act="closeSheet">Got it</button>`);
-const calHtml = () => sheetFrame('Add week to calendar', `
-  <p class="muted">Adds this week’s planned routines as all-day events. The file is made on your phone and never uploaded.</p>
-  <button class="btn wide" data-act="calOpen">Open in Calendar</button>
-  <p class="muted small">Best on iPhone: opens the Calendar “Add events” screen. If you end up on a page of text, close and reopen the app, then try the next option.</p>
-  <button class="btn ghost wide" data-act="calShare">Share / Save to Files</button>
-  <p class="muted small">Save to Files, then tap the file in the Files app and choose Add to Calendar. On Android, pick your calendar app.</p>
-  <button class="btn ghost wide" data-act="calData">Open as file</button>
-  <p class="muted small">Alternative method, in case the first one doesn’t work on your phone.</p>`);
 function openSheet(kind) { UI.sheet = kind; renderSheet(); }
 function closeSheet() {
   if (UI.sheet === 'news') setMeta('seenVersion', APP_VERSION);
@@ -1101,7 +1258,7 @@ function renderSheet() {
   const el = document.getElementById('sheet');
   if (UI.sheet) {
     el.classList.add('open'); document.body.classList.add('noscroll');
-    el.innerHTML = UI.sheet === 'news' ? newsHtml() : calHtml();
+    el.innerHTML = newsHtml();
     return;
   }
   const p = UI.picker;
@@ -1112,7 +1269,7 @@ function renderSheet() {
       <div class="sheet-h"><button class="link" data-act="closeSheet">Cancel</button><b>${esc(p.title)}</b>
         ${p.multi ? `<button class="link strong" data-act="pickDone" ${p.sel.size ? '' : 'disabled'}>Add${p.sel.size ? ' (' + p.sel.size + ')' : ''}</button>` : '<span></span>'}</div>
       ${filterBar('pk')}
-      <div class="pick-list" id="pklist">${pickerList()}</div>
+      <div class="pick-list" id="pkscroll"><div id="pkcreate">${pickerCreate()}</div><div id="pklist">${pickerList()}</div></div>
     </div>`;
 }
 
@@ -1165,16 +1322,18 @@ function exportWeightCSV() {
 }
 async function importFile(file) {
   let data;
-  try { data = JSON.parse(await file.text()); } catch { return alert('That file isn’t valid JSON.'); }
-  if (data?.app !== 'setlog' || !Array.isArray(data.exercises)) return alert(`That doesn’t look like a ${APP_NAME} backup.`);
+  try { data = JSON.parse(await file.text()); } catch { return tell('Can’t read that file', 'It isn’t a valid backup file. Choose a .json file made with Back up (JSON).'); }
+  if (data?.app !== 'setlog' || !Array.isArray(data.exercises)) return tell('Not a backup file', `That file wasn’t made by ${APP_NAME}’s Back up (JSON).`);
   const planDays = Object.keys(data.plan || {}).length;
-  if (!confirm(`Replace ALL data on this phone with the backup from ${data.exportedAt?.slice(0, 10) || 'unknown date'}?\n\n${data.sessions?.length || 0} sessions · ${data.routines?.length || 0} routines · ${data.weights?.length || 0} weigh-ins · ${planDays} planned day${planDays === 1 ? '' : 's'}${'plan' in data ? '' : '\n\nThis backup was made with an older version, so it has no week plan.'}`)) return;
+  if (!await sure(`Restore the backup from ${data.exportedAt?.slice(0, 10) || 'an unknown date'}?`,
+    `This replaces everything on this phone with:\n${data.sessions?.length || 0} sessions · ${data.routines?.length || 0} routines · ${data.weights?.length || 0} weigh-ins · ${planDays} planned day${planDays === 1 ? '' : 's'}${'plan' in data ? '' : '\n\nThis backup was made with an older version, so it has no week plan.'}`,
+    'Replace with this backup', 'Keep what’s on this phone')) return;
   await db.replaceAll({
     exercises: data.exercises, routines: data.routines || [], sessions: data.sessions || [], weights: data.weights || [],
     meta: [{ key: 'settings', value: data.settings || {} }, { key: 'plan', value: data.plan || {} }, { key: 'seeded', value: true }, { key: 'seenVersion', value: APP_VERSION }, { key: 'firstUse', value: Date.now() }, { key: 'lastBackup', value: Date.now() }],
   });
   await loadAll();
-  applyTheme();
+  applyPrefs(); applyTheme();
   toast('Backup restored'); go('train');
 }
 
@@ -1191,10 +1350,11 @@ const ACT = {
   },
   deleteRoutine: async d => {
     const r = S.routines.find(x => x.id === d.rid);
-    if (!confirm(`Delete routine “${r.name}”? Past sessions stay in History.`)) return;
+    if (!await sure(`Delete “${r.name}”?`, 'Past sessions stay in History. Any days it was planned on show it as a deleted routine.', 'Delete routine', 'Keep routine')) return;
     S.routines = S.routines.filter(x => x.id !== r.id); await db.del('routines', r.id); go('train');
   },
   pickForRoutine: d => openPicker({
+    ctx: 'routine',
     onPick: ids => {
       const r = S.routines.find(x => x.id === d.rid);
       for (const id of ids) { const ex = S.ex.get(id); r.items.push({ uid: uid(), exId: id, group: null, target: defaultTarget(ex) }); }
@@ -1202,6 +1362,7 @@ const ACT = {
     },
   }),
   pickForSession: d => openPicker({
+    ctx: 'session',
     onPick: ids => {
       const c = ctx(d.mode);
       for (const id of ids) {
@@ -1217,10 +1378,25 @@ const ACT = {
   itemDown: d => { const o = ownerItems(d); o.items = moveBlock(o.items, d.uid, 1); UI.menu = null; saveOwner(d, o); rerender(); },
   itemPair: d => { const o = ownerItems(d); pairWithNext(o.items, d.uid); UI.menu = null; saveOwner(d, o); rerender(); },
   itemUnpair: d => { const o = ownerItems(d); o.items = unpair(o.items, d.uid); UI.menu = null; saveOwner(d, o); rerender(); },
-  itemRemove: d => {
+  newExForRoutine: d => newExerciseFor({
+    back: '#/routine/' + d.rid, note: 'It’s added to this routine when you save.', saveLabel: 'Save and add to routine',
+    onCreate: id => { const r = S.routines.find(x => x.id === d.rid); if (r) { r.items.push({ uid: uid(), exId: id, group: null, target: defaultTarget(S.ex.get(id)) }); putRoutine(r); } },
+  }),
+  pickNew: () => {
+    const p = UI.picker; const back = location.hash;
+    const picked = [...p.sel];
+    UI.picker = null; renderSheet();
+    newExerciseFor({
+      back, name: p.q.trim(), category: p.cat,
+      note: p.multi ? `It’s added to this ${p.ctx || 'list'} when you save${picked.length ? `, along with the ${picked.length} you ticked` : ''}.` : 'It’s swapped in when you save.',
+      saveLabel: p.multi ? `Save and add to ${p.ctx || 'list'}` : 'Save and swap in',
+      onCreate: id => p.onPick(p.multi ? [...picked, id] : [id]),
+    });
+  },
+  itemRemove: async d => {
     const o = ownerItems(d); const it = o.items.find(x => x.uid === d.uid);
     const ex = S.ex.get(it.exId);
-    if (it.sets?.some(s => s.done) && d.scope === 'live' && !confirm(`Remove ${ex?.name || 'this exercise'} and its ticked sets?`)) return;
+    if (it.sets?.some(s => s.done) && d.scope === 'live' && !await sure(`Remove ${ex?.name || 'this exercise'}?`, 'Its ticked sets will be removed from this session too.', 'Remove exercise and sets', 'Keep it')) return;
     o.items = o.items.filter(x => x.uid !== d.uid);
     const g = it.group; if (g && o.items.filter(x => x.group === g).length === 1) o.items.forEach(x => { if (x.group === g) x.group = null; });
     UI.menu = null; saveOwner(d, o); rerender();
@@ -1258,10 +1434,10 @@ const ACT = {
     for (const f of fieldsFor(ex)) s[f.key] = prev ? prev[f.key] ?? null : setFromTarget(ex, it.target)[f.key] ?? null;
     it.sets.push(s); c.save(); rerender(); updateSessionCounters();
   },
-  popSet: d => {
+  popSet: async d => {
     const it = findItem(S.meta.active, d.uid);
     const last = it.sets[it.sets.length - 1];
-    if (last?.done && !confirm('The last set is ticked. Remove it anyway?')) return;
+    if (last?.done && !await sure('The last set is ticked', 'Removing it deletes what you logged for that set.', 'Remove ticked set', 'Keep it')) return;
     it.sets.pop(); saveActive(); rerender();
   },
   delSet: d => { const c = ctx(d.mode); const it = findItem(c.sess, d.uid); it.sets.splice(+d.set, 1); rerender(); },
@@ -1276,7 +1452,7 @@ const ACT = {
     location.replace('#/history/' + d.id);
   },
   deleteSession: async d => {
-    if (!confirm('Delete this session permanently?')) return;
+    if (!await sure('Delete this session?', 'It’s removed from History, charts and personal records. This can’t be undone.', 'Delete session', 'Keep session')) return;
     S.sessions = S.sessions.filter(s => s.id !== d.id); await db.del('sessions', d.id);
     toast('Session deleted'); location.replace('#/history');
   },
@@ -1286,7 +1462,17 @@ const ACT = {
   deleteEx: async d => {
     const ex = S.ex.get(d.id);
     const n = usage(d.id); const nr = S.routines.filter(r => r.items.some(i => i.exId === d.id)).length;
-    if (!confirm(`Delete “${ex.name}” permanently?\n\nThis removes it and its logged sets from ${n} session${n === 1 ? '' : 's'}${nr ? ` and from ${nr} routine${nr === 1 ? '' : 's'}` : ''}. This can't be undone.\n\nTip: Archive keeps the history instead.`)) return;
+    const c = await ask({
+      title: `Delete “${ex.name}” permanently?`,
+      message: `This removes it and its logged sets from ${n} session${n === 1 ? '' : 's'}${nr ? ` and from ${nr} routine${nr === 1 ? '' : 's'}` : ''}. This can’t be undone.\n\nArchiving hides it from lists but keeps its history.`,
+      buttons: [
+        { label: 'Archive instead', value: 'archive', style: 'primary' },
+        { label: 'Delete it and its history', value: 'delete', style: 'danger' },
+        { label: 'Cancel', value: null },
+      ],
+    });
+    if (c === 'archive') { ex.archived = true; await putEx(ex); toast('Archived — hidden from pickers'); return rerender(); }
+    if (c !== 'delete') return;
     for (const s of [...S.sessions]) {
       if (!s.items.some(i => i.exId === d.id)) continue;
       s.items = s.items.filter(i => i.exId !== d.id);
@@ -1299,25 +1485,36 @@ const ACT = {
   exMus: d => { const m = UI.exDraft.muscles; const i = m.indexOf(d.v); if (i < 0) m.push(d.v); else m.splice(i, 1); rerender(); },
   saveEx: async () => {
     const d = UI.exDraft;
-    if (!d.name.trim()) return alert('Give the exercise a name.');
-    const dup = exList().find(e => e.id !== d.id && e.name.toLowerCase() === d.name.trim().toLowerCase());
-    if (dup && !confirm(`An exercise called “${dup.name}” already exists. Save anyway?`)) return;
-    const { _for, ...ex } = d; ex.name = ex.name.trim();
+    if (nameProblem(d)) return;   // the Save button is disabled in this case
+    const { _for, ...ex } = d; ex.name = ex.name.trim().replace(/\s+/g, ' ');
     if (!isCardio(ex)) ex.modality = null; else ex.perSide = false;
-    await putEx(ex); UI.exDraft = null; toast('Exercise saved');
+    await putEx(ex); UI.exDraft = null;
+    const nx = _for === 'new' && UI.newEx;
+    if (nx) {
+      UI.newEx = null;
+      location.replace(nx.back);
+      nx.onCreate(ex.id);
+      toast(`Created “${ex.name}”`);
+      return;
+    }
+    toast('Exercise saved');
     if (_for === 'new' && history.length > 1) history.back(); else location.replace('#/exercise/' + ex.id);
   },
   wrange: d => { UI.wrange = d.v; rerender(); },
   saveWeight: async () => {
-    const kg = num(document.getElementById('wkg').value);
-    const date = document.getElementById('wdate').value || localISO();
-    if (!kg || kg < 20 || kg > 400) return alert('Enter your weight in kg, e.g. 76.4');
+    const el = id => document.getElementById(id);
+    let kg;
+    if (prefs.body === 'st') kg = el('wst').value.trim() || el('wlb').value.trim() ? kgFromStLb(el('wst').value, el('wlb').value) : null;
+    else { const v = num(el('wkg').value); kg = v === null ? null : prefs.body === 'lb' ? kgFromStLb(0, v) : v; }
+    const date = el('wdate').value || localISO();
+    if (!kg || kg < 20 || kg > 400) return tell('Check your weight', prefs.body === 'st' ? 'Enter stone and pounds, e.g. 12 st 4 lb.' : `Enter your weight in ${prefs.body}, e.g. ${prefs.body === 'lb' ? '168.4' : '76.4'}.`);
     const existed = S.weights.some(w => w.date === date);
     S.weights = S.weights.filter(w => w.date !== date); S.weights.push({ date, kg });
     await db.put('weights', { date, kg });
     toast(existed ? 'Updated that day’s entry' : 'Logged'); rerender();
   },
-  delWeight: async d => { if (!confirm('Delete this entry?')) return; S.weights = S.weights.filter(w => w.date !== d.v); await db.del('weights', d.v); rerender(); },
+  delWeight: async d => {
+    if (!await sure('Delete this weigh-in?', fmtDate(new Date(d.v + 'T12:00:00'), { weekday: 'long', day: 'numeric', month: 'long' }), 'Delete weigh-in', 'Keep it')) return; S.weights = S.weights.filter(w => w.date !== d.v); await db.del('weights', d.v); rerender(); },
   // week plan
   wk: d => { const v = +d.v; UI.week = v ? addDays(curMonday(), 7 * v).getTime() : null; UI.pday = null; UI.planAdd = false; rerender(); },
   pday: d => { UI.pday = d.v; UI.planAdd = false; rerender(); },
@@ -1338,10 +1535,7 @@ const ACT = {
     if (!r.name.trim()) r.name = 'Untitled routine';
     await putRoutine(r); toast('Routine saved'); go('train');
   },
-  planIcs: () => {
-    if (!weekIsos(curMonday()).some(iso => (plan()[iso] || []).some(e => S.routines.some(r => r.id === e.routineId)))) return toast('Nothing planned this week');
-    openSheet('cal');
-  },
+  planIcs: () => calExport(),
   // history calendar
   hview: d => { UI.hview = d.v; UI.hday = null; rerender(); },
   hnav: d => {
@@ -1355,7 +1549,12 @@ const ACT = {
   hday: d => { UI.hday = UI.hday === d.v ? null : d.v; rerender(); },
   hmonth: d => { UI.hview = 'month'; UI.hcur = new Date(new Date(UI.hcur).getFullYear(), +d.v, 1).getTime(); UI.hday = null; rerender(); },
   effort: d => { const c = ctx(d.mode); const n = +d.v; c.sess.effort = c.sess.effort === n ? null : n; c.save(); rerender(); },
-  theme: d => { setMeta('settings', { ...(S.meta.settings || {}), theme: d.v }); applyTheme(); rerender(); },
+  theme: d => { setSettings({ theme: d.v }); applyTheme(); rerender(); },
+  unit: d => {
+    if (d.k === 'week') setSettings({ weekStart: d.v });
+    else setSettings({ units: { ...(cfg().units || {}), [d.k]: d.v } });
+    applyPrefs(); UI.week = null; rerender();
+  },
   exportJSON: () => exportJSON(),
   exportSetsCSV: () => exportSetsCSV(),
   exportWeightCSV: () => exportWeightCSV(),
@@ -1365,28 +1564,25 @@ const ACT = {
     const p = UI.picker;
     if (!p.multi) { const cb = p.onPick; UI.picker = null; renderSheet(); cb([d.id]); return; }
     if (p.sel.has(d.id)) p.sel.delete(d.id); else p.sel.add(d.id);
-    const sc = document.getElementById('pklist').scrollTop;
-    renderSheet(); document.getElementById('pklist').scrollTop = sc;
+    const sc = document.getElementById('pkscroll').scrollTop;
+    renderSheet(); document.getElementById('pkscroll').scrollTop = sc;
   },
   pickDone: () => { const p = UI.picker; UI.picker = null; renderSheet(); p.onPick([...p.sel]); },
   closeSheet: () => closeSheet(),
   whatsNew: () => openSheet('news'),
   checkUpdate: () => checkUpdate(),
-  calOpen: () => calExport('open'),
-  calShare: () => calExport('share'),
-  calData: () => calExport('data'),
   catReset: d => { const cc = { ...(cfg().catColors || {}) }; delete cc[d.v]; setMeta('settings', { ...(S.meta.settings || {}), catColors: cc }); rerender(); },
   addCat: () => {
     const inp = document.getElementById('newcat'); const name = inp.value.trim().replace(/\s+/g, ' ');
     if (!name) return inp.focus();
-    if (name.toLowerCase() === 'all' || cats().some(c => c.toLowerCase() === name.toLowerCase())) return alert(`There’s already a category called “${name}”.`);
+    if (name.toLowerCase() === 'all' || cats().some(c => c.toLowerCase() === name.toLowerCase())) return tell('That category already exists', `There’s already a category called “${name}”.`);
     setMeta('settings', { ...(S.meta.settings || {}), customCats: [...(cfg().customCats || []), name] });
     toast(`Added “${name}”`); rerender();
   },
-  delCat: d => {
+  delCat: async d => {
     const n = [...S.ex.values()].filter(e => e.category === d.v).length;
-    if (n) return alert(`${n} exercise${n === 1 ? ' uses' : 's use'} “${d.v}”. Move ${n === 1 ? 'it' : 'them'} to another category first.`);
-    if (!confirm(`Remove the category “${d.v}”?`)) return;
+    if (n) return tell(`“${d.v}” is still in use`, `${n} exercise${n === 1 ? ' uses' : 's use'} it. Move ${n === 1 ? 'it' : 'them'} to another category in the exercise editor first.`);
+    if (!await sure(`Remove “${d.v}”?`, 'No exercises use it, so nothing else changes.', 'Remove category', 'Keep it')) return;
     const cc = { ...(cfg().catColors || {}) }; delete cc[d.v];
     setMeta('settings', { ...(S.meta.settings || {}), customCats: (cfg().customCats || []).filter(c => c !== d.v), catColors: cc });
     if (UI.excat === d.v) UI.excat = 'All';
@@ -1415,7 +1611,8 @@ const IN = {
   groupRest: (d, v) => { const c = ctx(d.mode); const sec = parseDur(v); c.sess.items.filter(it => it.group === d.group).forEach(it => { it.rest = sec; }); c.save(); updateSessionCounters(); },
   set: (d, v) => {
     const c = ctx(d.mode); const it = findItem(c.sess, d.uid); const i = +d.set;
-    const val = d.kind === 'dur' ? parseDur(v, d.plain) : num(v);
+    // Stored in kg / km / s per km whatever units are shown.
+    const val = parseField(d.kind, v, d.plain);
     it.sets[i][d.key] = val; it.sets[i].touched = true;
     // Carry the value forward into later sets you haven't touched yet.
     for (let j = i + 1; j < it.sets.length; j++) {
@@ -1423,13 +1620,23 @@ const IN = {
       if (t.touched || t.done) continue;
       t[d.key] = val;
       const inp = document.querySelector(`[data-in="set"][data-uid="${d.uid}"][data-set="${j}"][data-key="${d.key}"]`);
-      if (inp) inp.value = d.kind === 'dur' ? (val === null ? '' : fmtDur(val)) : v;
+      if (inp) inp.value = d.kind === 'dur' || d.kind === 'pace' ? fmtField({ kind: d.kind }, val) : v;
     }
     c.save();
   },
-  exName: (d, v) => { UI.exDraft.name = v; },
+  exName: (d, v) => {
+    UI.exDraft.name = v;
+    // Live duplicate check: grey out Save and explain, without re-rendering the form.
+    const problem = nameProblem(UI.exDraft);
+    document.getElementById('exNameNote').textContent = problem;
+    document.getElementById('saveExBtn').disabled = !!problem;
+  },
   exq: (d, v) => { UI.exq = v; document.getElementById('exlist').innerHTML = exerciseRows(filteredExercises()); },
-  pkq: (d, v) => { UI.picker.q = v; document.getElementById('pklist').innerHTML = pickerList(); },
+  pkq: (d, v) => {
+    UI.picker.q = v;
+    document.getElementById('pklist').innerHTML = pickerList();
+    document.getElementById('pkcreate').innerHTML = pickerCreate();
+  },
 };
 
 const CH = {
@@ -1452,6 +1659,15 @@ const CH = {
     setMeta('settings', { ...(S.meta.settings || {}), [d.key]: n }); toast('Saved');
   },
   sessTime: (d, v) => { if (!v) return; UI.draft[d.key] = new Date(v).getTime(); },
+  planTime: (d, v) => {
+    const p = { ...plan() };
+    p[d.v] = (p[d.v] || []).map(e => {
+      if (e.id !== d.id) return e;
+      const { time, ...rest } = e;
+      return /^\d{2}:\d{2}$/.test(v) ? { ...rest, time: v } : rest;
+    });
+    savePlan(p); rerender();
+  },
   catColor: (d, v) => {
     if (!/^#[0-9a-f]{6}$/i.test(v)) return;
     setMeta('settings', { ...(S.meta.settings || {}), catColors: { ...(cfg().catColors || {}), [d.v]: v } }); rerender();
@@ -1473,12 +1689,12 @@ document.addEventListener('input', ev => {
 });
 document.addEventListener('change', ev => {
   const el = ev.target;
-  if (el.dataset?.in && el.dataset.kind === 'dur') { const v = parseDur(el.value, el.dataset.plain); el.value = v === null ? '' : fmtDur(v); }
+  if (el.dataset?.in && (el.dataset.kind === 'dur' || el.dataset.kind === 'pace')) { const v = parseDur(el.value, el.dataset.plain); el.value = v === null ? '' : fmtDur(v); }
   const fn = el.dataset && CH[el.dataset.ch];
   if (fn) fn(el.dataset, el.value, el, ev);
 });
 // Select-all on focus makes overwriting a pre-filled value one tap.
-document.addEventListener('focusin', ev => { if (ev.target.matches?.('input.in:not([type=date]):not([type=datetime-local]):not([type=search]):not([data-in=exName]):not([data-in=rtName])')) setTimeout(() => ev.target.select?.(), 0); });
+document.addEventListener('focusin', ev => { if (ev.target.matches?.('input.in:not([type=date]):not([type=datetime-local]):not([type=time]):not([type=search]):not([data-in=exName]):not([data-in=rtName]):not(#dlg-in)')) setTimeout(() => ev.target.select?.(), 0); });
 // Flush pending writes when the app is backgrounded.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && S.meta.active) { clearTimeout(timers.active); setMeta('active', S.meta.active); }
@@ -1492,7 +1708,7 @@ async function boot() {
     main().innerHTML = `<div class="empty">Couldn't open storage on this device (${esc(e.message || e)}). If you're in a private browsing tab, open it in a normal tab.</div>`;
     return;
   }
-  applyTheme();
+  applyPrefs(); applyTheme();
   if (!location.hash) location.replace('#/' + (S.meta.active ? 'session' : 'train'));
   render();
   // What's new: once per version for existing users; new installs skip it.

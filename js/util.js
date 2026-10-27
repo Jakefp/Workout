@@ -40,12 +40,55 @@ export function localISO(d = new Date()) {
   return z.toISOString().slice(0, 10);
 }
 
-// Monday 00:00 (local) of the week containing d.
+// ---------- Display units ----------
+// Data is always stored in kg, km and seconds per km; these only change what is shown and typed.
+// Set from Settings by the app (applyPrefs). weekStart: 1 = Monday, 0 = Sunday.
+export const prefs = { load: 'kg', body: 'kg', dist: 'km', weekStart: 1 };
+const LB = 0.45359237, MI = 1.609344, ST = 6.35029318;
+const r1 = v => Math.round(v * 10) / 10;
+export const toLoad = kg => prefs.load === 'lb' ? kg / LB : kg;
+export const fromLoad = v => prefs.load === 'lb' ? v * LB : v;
+export const fmtLoad = kg => fmtNum(r1(toLoad(kg)));
+export const toDist = km => prefs.dist === 'mi' ? km / MI : km;
+export const fromDist = v => prefs.dist === 'mi' ? v * MI : v;
+export const toPace = sec => prefs.dist === 'mi' ? sec * MI : sec;      // s/km -> s/mi
+export const fromPace = sec => prefs.dist === 'mi' ? sec / MI : sec;
+// Bodyweight: kg, lb, or stone (shown as "12 st 4.5 lb"). toBody gives a plain number for charts.
+export const toBody = kg => prefs.body === 'lb' ? kg / LB : prefs.body === 'st' ? kg / ST : kg;
+export const kgFromStLb = (st, lb) => (num(st) || 0) * ST + (num(lb) || 0) * LB;
+export function fmtBody(kg, withUnit = true) {
+  if (prefs.body === 'st') {
+    const totalLb = Math.round(kg / LB * 10) / 10;
+    const st = Math.floor(totalLb / 14);
+    return `${st} st ${fmtNum(r1(totalLb - st * 14))} lb`;
+  }
+  return `${toBody(kg).toFixed(1)}${withUnit ? ' ' + prefs.body : ''}`;
+}
+// A change in bodyweight (stone users see it in lb).
+export const fmtBodyDelta = kg => {
+  const u = prefs.body === 'kg' ? 'kg' : 'lb';
+  const v = u === 'kg' ? kg : kg / LB;
+  return `${v > 0 ? '+' : ''}${v.toFixed(1)} ${u}`;
+};
+// Parse a typed value for a set field into stored units.
+export function parseField(kind, str, plain) {
+  switch (kind) {
+    case 'dur': return parseDur(str, plain);
+    case 'pace': { const s = parseDur(str); return s === null ? null : fromPace(s); }
+    case 'load': { const v = num(str); return v === null ? null : fromLoad(v); }
+    case 'dist': { const v = num(str); return v === null ? null : fromDist(v); }
+    default: return num(str);
+  }
+}
+
+// Start (00:00 local) of the week containing d, honouring prefs.weekStart.
 export function startOfWeek(d = new Date()) {
   const x = new Date(d); x.setHours(0, 0, 0, 0);
-  x.setDate(x.getDate() - (x.getDay() + 6) % 7);
+  x.setDate(x.getDate() - (x.getDay() - prefs.weekStart + 7) % 7);
   return x;
 }
+// Single-letter weekday headers in display order.
+export const weekLetters = () => { const L = ['S', 'M', 'T', 'W', 'T', 'F', 'S']; return [...L.slice(prefs.weekStart), ...L.slice(0, prefs.weekStart)]; };
 // Calendar-day arithmetic in local time, so DST changes don't shift dates.
 export const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 
@@ -72,7 +115,9 @@ export const TYPES = {
   steady: 'Cardio steady',
 };
 
-export const MODALITIES = { row: 'Rower', ski: 'SkiErg', bike: 'Bike', run: 'Run', other: 'Other' };
+export const MODALITIES = { row: 'Rower', ski: 'SkiErg', bike: 'Bike', run: 'Run', walk: 'Walk / hike', swim: 'Swim', other: 'Other machine (watts)', general: 'General (time only)' };
+const PACED = ['run', 'walk'];
+const POWERED = ['row', 'ski', 'bike', 'other'];
 
 export const isCardio = ex => ex.type === 'interval' || ex.type === 'steady';
 
@@ -86,7 +131,8 @@ function modalityFields(modality) {
       { key: 'watts', label: 'W', kind: 'num', ph: '' },
       { key: 'cadence', label: 'rpm', kind: 'num', ph: '' },
     ];
-    case 'run': return [{ key: 'pace', label: '/km', kind: 'dur', ph: '5:00' }];
+    case 'run': case 'walk': return [{ key: 'pace', label: '/' + prefs.dist, kind: 'pace', ph: modality === 'walk' ? '10:00' : '5:00' }];
+    case 'swim': case 'general': return [];
     default: return [{ key: 'watts', label: 'W', kind: 'num', ph: '' }];
   }
 }
@@ -95,11 +141,11 @@ function modalityFields(modality) {
 export function fieldsFor(ex) {
   switch (ex.type) {
     case 'weight': return [
-      { key: 'kg', label: 'kg', kind: 'num' },
+      { key: 'kg', label: prefs.load, kind: 'load' },
       { key: 'reps', label: ex.perSide ? 'reps/side' : 'reps', kind: 'num' },
     ];
     case 'bodyweight': return [
-      { key: 'kg', label: '± kg', kind: 'num', ph: '0' },
+      { key: 'kg', label: '± ' + prefs.load, kind: 'load', ph: '0' },
       { key: 'reps', label: ex.perSide ? 'reps/side' : 'reps', kind: 'num' },
     ];
     case 'hold': case 'stretch': return [
@@ -111,7 +157,7 @@ export function fieldsFor(ex) {
     ];
     case 'steady': return [
       { key: 'time', label: 'time', kind: 'dur', ph: '45:00' },
-      { key: 'dist', label: 'km', kind: 'num' },
+      { key: 'dist', label: prefs.dist, kind: 'dist' },
       { key: 'hr', label: 'avg HR', kind: 'num' },
       ...modalityFields(ex.modality),
     ];
@@ -123,17 +169,23 @@ export const setLabel = ex => ex.type === 'interval' ? 'Round' : 'Set';
 
 export function fmtField(f, v) {
   if (v === null || v === undefined || v === '') return '';
-  return f.kind === 'dur' ? fmtDur(v) : fmtNum(v);
+  switch (f.kind) {
+    case 'dur': return fmtDur(v);
+    case 'pace': return fmtDur(toPace(v));
+    case 'load': return fmtLoad(v);
+    case 'dist': return fmtNum(toDist(v));
+    default: return fmtNum(v);
+  }
 }
 
 // Compact one-line summary of a set, e.g. "80 kg × 8", "BW+10 × 6", "0:45", "4:00 @ 245 W"
 export function summariseSet(ex, s) {
   const reps = s.reps ?? '–';
   switch (ex.type) {
-    case 'weight': return `${fmtNum(s.kg) || '–'} kg × ${reps}`;
+    case 'weight': return `${num(s.kg) === null ? '–' : fmtLoad(num(s.kg))} ${prefs.load} × ${reps}`;
     case 'bodyweight': {
       const kg = num(s.kg);
-      const load = !kg ? 'BW' : kg > 0 ? `BW+${fmtNum(kg)}` : `BW${fmtNum(kg)}`;
+      const load = !kg ? 'BW' : kg > 0 ? `BW+${fmtLoad(kg)}` : `BW${fmtLoad(kg)}`;
       return `${load} × ${reps}`;
     }
     case 'hold': case 'stretch': return fmtDur(s.time) || '–';
@@ -145,7 +197,7 @@ export function summariseSet(ex, s) {
     case 'steady': {
       const bits = [];
       if (s.time) bits.push(fmtDur(s.time));
-      if (s.dist) bits.push(`${fmtNum(s.dist)} km`);
+      if (s.dist) bits.push(`${fmtNum(toDist(s.dist))} ${prefs.dist}`);
       const m = cardioBits(ex, s);
       if (m) bits.push(m);
       if (s.hr) bits.push(`${s.hr} bpm`);
@@ -158,7 +210,7 @@ export function summariseSet(ex, s) {
 function cardioBits(ex, s) {
   const b = [];
   if (s.split) b.push(`${fmtDur(s.split)}/500m`);
-  if (s.pace) b.push(`${fmtDur(s.pace)}/km`);
+  if (s.pace) b.push(`${fmtDur(toPace(s.pace))}/${prefs.dist}`);
   if (s.watts) b.push(`${s.watts} W`);
   if (s.cadence) b.push(`${s.cadence} rpm`);
   return b.join(' ');
@@ -275,12 +327,13 @@ export function setScore(ex, s, bw = 75) {
     case 'hold': case 'stretch': return time || null;
     case 'interval': {
       if (!time) return null;
-      if (ex.modality === 'run') return pace ? time / pace : null;
+      if (PACED.includes(ex.modality)) return pace ? time / pace : null;
+      if (!POWERED.includes(ex.modality)) return time;   // swim / general: longest effort
       const split = num(s.split);
       const w = num(s.watts) || (split ? 2.8 / Math.pow(split / 500, 3) : null);
       return w ? w * time / 60 : null;
     }
-    case 'steady': return num(s.dist) || (time && pace ? time / pace : null);
+    case 'steady': return num(s.dist) || (time && pace ? time / pace : null) || (POWERED.includes(ex.modality) ? null : time || null);
   }
   return null;
 }
@@ -313,16 +366,16 @@ export function metricsFor(ex) {
           const reps = num(s.reps) || 0;
           if (!best || kg > best.kg || (kg === best.kg && reps > best.reps)) best = { kg, reps };
         }
-        return best ? { y: best.kg, label: `${fmtNum(best.kg)} kg × ${best.reps}` } : null;
+        return best ? { y: toLoad(best.kg), label: `${fmtLoad(best.kg)} ${prefs.load} × ${best.reps}` } : null;
       },
-      fmt: v => `${fmtNum(v)} kg`,
+      fmt: v => `${fmtNum(r1(v))} ${prefs.load}`,
     }, {
-      key: 'volume', label: 'Volume', unit: 'kg',
+      key: 'volume', label: 'Volume', unit: prefs.load,
       get(it) {
         const v = done(it).reduce((t, s) => t + (num(s.kg) || 0) * (num(s.reps) || 0), 0);
-        return v ? { y: v, label: `${fmtNum(v)} kg total` } : null;
+        return v ? { y: toLoad(v), label: `${fmtNum(Math.round(toLoad(v)))} ${prefs.load} total` } : null;
       },
-      fmt: v => `${fmtNum(Math.round(v))} kg`,
+      fmt: v => `${fmtNum(Math.round(v))} ${prefs.load}`,
     }, totalReps];
     case 'bodyweight': return [
       {
@@ -332,13 +385,14 @@ export function metricsFor(ex) {
       },
       totalReps,
       {
-        key: 'load', label: 'Reps × added kg', unit: '',
+        key: 'load', label: `Reps × added ${prefs.load}`, unit: '',
         get(it) {
           let best = null;
           for (const s of done(it)) {
             const kg = num(s.kg), r = num(s.reps);
             if (!kg || kg <= 0 || !r) continue;
-            if (!best || kg * r > best.y) best = { y: kg * r, label: `+${fmtNum(kg)} kg × ${r}` };
+            const y = toLoad(kg) * r;
+            if (!best || y > best.y) best = { y, label: `+${fmtLoad(kg)} ${prefs.load} × ${r}` };
           }
           return best;
         },
@@ -353,7 +407,7 @@ export function metricsFor(ex) {
     case 'interval': case 'steady': {
       const out = [];
       const m = ex.modality;
-      if (m !== 'run') out.push({
+      if (POWERED.includes(m)) out.push({
         key: 'watts', label: 'Average watts', unit: 'W',
         get(it) { const w = done(it).map(s => num(s.watts)).filter(v => v); const a = avg(w); return a ? { y: a, label: `${Math.round(a)} W` } : null; },
         fmt: v => `${Math.round(v)} W`,
@@ -363,15 +417,20 @@ export function metricsFor(ex) {
         get(it) { const w = done(it).map(s => num(s.split)).filter(v => v); const a = avg(w); return a ? { y: a, label: `${fmtDur(a)}/500m` } : null; },
         fmt: v => fmtDur(v),
       });
-      if (m === 'run') out.push({
-        key: 'pace', label: 'Average pace', unit: '/km', invert: true,
-        get(it) { const w = done(it).map(s => num(s.pace)).filter(v => v); const a = avg(w); return a ? { y: a, label: `${fmtDur(a)}/km` } : null; },
+      if (PACED.includes(m)) out.push({
+        key: 'pace', label: 'Average pace', unit: '/' + prefs.dist, invert: true,
+        get(it) { const w = done(it).map(s => num(s.pace)).filter(v => v); const a = avg(w); return a ? { y: toPace(a), label: `${fmtDur(toPace(a))}/${prefs.dist}` } : null; },
         fmt: v => fmtDur(v),
       });
       if (ex.type === 'steady') out.push({
-        key: 'dist', label: 'Distance', unit: 'km',
-        get(it) { const d = done(it).map(s => num(s.dist)).filter(v => v); return d.length ? { y: d[0], label: `${fmtNum(d[0])} km` } : null; },
-        fmt: v => `${fmtNum(v)} km`,
+        key: 'dist', label: 'Distance', unit: prefs.dist,
+        get(it) { const d = done(it).map(s => num(s.dist)).filter(v => v); return d.length ? { y: toDist(d[0]), label: `${fmtNum(toDist(d[0]))} ${prefs.dist}` } : null; },
+        fmt: v => `${fmtNum(v)} ${prefs.dist}`,
+      });
+      out.push({
+        key: 'time', label: 'Total time', unit: 's',
+        get(it) { const t = done(it).reduce((n, s) => n + (num(s.time) || 0), 0); return t ? { y: t, label: fmtDur(t) } : null; },
+        fmt: v => fmtDur(v),
       });
       return out;
     }
