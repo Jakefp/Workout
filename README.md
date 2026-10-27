@@ -38,8 +38,7 @@ All your data lives only on the phone.
   - Step through weeks with ‹ ›.
   - Tap a day, then **+ Plan a routine**. Today's planned routines have a **Start** button, and they're ticked off once you've done them.
   - **Copy last week** repeats last week's plan.
-  - Tap **+ Time** on a planned routine to give it a time.
-  - **Add week to Calendar** opens your Calendar app with the week's plan. Timed routines appear at their time, lasting as long as the routine's estimate. The others appear as all-day events.
+  - **Add week to Calendar** opens your Calendar app with the week's plan as all-day events. Set a time in your calendar if you want one.
 - **Times:** type `1.30` or `1:30` for 1 minute 30 seconds. The iPhone number pad has no colon, so `.` works as the separator. A bare number means seconds (`45` → 0:45). The exception is steady-cardio duration, where a bare number means minutes (`45` → 45:00).
 - **Logging sets:**
   - Each set is pre-filled from the last time you did that exercise, in any routine.

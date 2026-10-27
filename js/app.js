@@ -10,7 +10,7 @@ import {
 
 const APP_NAME = 'Workout_jfp';
 const FILE_PREFIX = 'workout_jfp';
-const APP_VERSION = '1.3.2';
+const APP_VERSION = '1.3.3';
 const DEFAULT_CFG = { secPerRep: 3, minSetSec: 20, changeoverSec: 60 };
 const BACKUP_DAYS = 14;
 const THEMES = { auto: 'Auto', light: 'Light', dark: 'Dark' };
@@ -29,8 +29,7 @@ const UI = {
 const WHATS_NEW = [
   ['➕', '270+ new exercises', 'Including swimming, hiking, boxing and other cardio, plus a new red Rehab category for isometric holds.'],
   ['📏', 'Your units', 'Choose kg or lb for lifting, kg, lb or stone for bodyweight, km or miles for distance, and whether weeks start on Monday or Sunday. Find them in Settings → Units.'],
-  ['⏰', 'Times in your week plan', 'Give a planned routine a time and it goes into your calendar at that time instead of as an all-day event.'],
-  ['🗓️', 'Add to Calendar in one tap', 'Add week to Calendar now goes straight to your Calendar app.'],
+  ['🗓️', 'Add to Calendar fixed', 'Add week to Calendar opens your Calendar app again in one tap. Routines are added as all-day events; set times in your calendar if you want them.'],
   ['🆕', 'New exercises while building', 'Create an exercise from the Add exercises list. Names that already exist are flagged.'],
   ['💬', 'Clearer choices', 'Pop-ups now say what each button does. For example, finishing a changed routine lets you update it, save it as a new routine, or keep the change as a one-off.'],
 ];
@@ -487,10 +486,6 @@ function trainView() {
 }
 
 const curMonday = () => startOfWeek(UI.week ? new Date(UI.week) : new Date());
-// A day's planned entries, timed ones first in time order, then untimed in the order added.
-const planDay = (p, iso) => (p[iso] || []).map((e, i) => ({ e, i }))
-  .sort((a, b) => (a.e.time ? 0 : 1) - (b.e.time ? 0 : 1) || (a.e.time || '').localeCompare(b.e.time || '') || a.i - b.i)
-  .map(x => x.e);
 const weekIsos = mon => [...Array(7)].map((_, i) => localISO(addDays(mon, i)));
 const longDay = iso => fmtDate(new Date(iso + 'T12:00:00'), { weekday: 'long', day: 'numeric', month: 'long' });
 
@@ -501,7 +496,7 @@ function weekHtml() {
   const sel = isos.includes(UI.pday) ? UI.pday : isos.includes(today) ? today : isos[0];
   const byDay = sessionsByDay();
   const p = plan();
-  const st = Object.fromEntries(isos.map(iso => [iso, planStatus(planDay(p, iso), byDay.get(iso) || [])]));
+  const st = Object.fromEntries(isos.map(iso => [iso, planStatus(p[iso] || [], byDay.get(iso) || [])]));
   const thisWeek = isos.includes(today);
   const label = thisWeek ? 'This week'
     : `${fmtDate(mon, { day: 'numeric', month: 'short' })} – ${fmtDate(addDays(mon, 6), { day: 'numeric', month: 'short' })}`;
@@ -523,8 +518,6 @@ function weekHtml() {
       return `<div class="plan-row"><span class="pchk"><i class="pip ${sel < today ? 'missed' : ''}"></i></span>
         ${r ? `<a class="grow" href="#/routine/${r.id}"><span class="item-name">${esc(r.name)}<span class="rdots">${catDotsFor(r.items)}</span></span><span class="muted">~${fmtLength(routineEst(r))}</span></a>`
           : `<span class="grow muted">Deleted routine</span>`}
-        <label class="ptime${e.time ? ' set' : ''}"><span>${e.time ? esc(e.time) : '+ Time'}</span>
-          <input type="time" value="${esc(e.time || '')}" data-ch="planTime" data-v="${sel}" data-id="${e.id}" aria-label="Time for ${esc(r?.name || 'routine')}"></label>
         ${r && sel === today && r.items.length ? `<button class="btn sm" data-act="start" data-id="${r.id}">Start</button>` : ''}
         <button class="icon" data-act="planDel" data-v="${sel}" data-id="${e.id}" aria-label="Remove from plan">✕</button></div>`;
     }),
@@ -547,7 +540,7 @@ function weekHtml() {
     </div>
     <div class="plan-actions">
       <button class="link" data-act="planCopy">Copy last week</button>
-      <button class="link" data-act="planIcs">Add week to Calendar</button>
+      ${icsLink()}
     </div>
   </section>`;
 }
@@ -558,15 +551,15 @@ async function copyLastWeek() {
   const p = { ...plan() };
   const n = src.reduce((k, iso) => k + (p[iso]?.length || 0), 0);
   if (!n) return toast('Last week has no plan to copy');
-  if (dst.some(iso => p[iso]?.length) && !await sure('This week already has a plan', 'Copying replaces it with last week’s plan, including times.', 'Replace with last week’s plan', 'Keep this week’s plan')) return;
+  if (dst.some(iso => p[iso]?.length) && !await sure('This week already has a plan', 'Copying replaces it with last week’s plan.', 'Replace with last week’s plan', 'Keep this week’s plan')) return;
   dst.forEach((iso, i) => {
-    const e = (p[src[i]] || []).map(x => ({ id: uid(), routineId: x.routineId, ...(x.time ? { time: x.time } : {}) }));
+    const e = (p[src[i]] || []).map(x => ({ id: uid(), routineId: x.routineId }));
     if (e.length) p[iso] = e; else delete p[iso];
   });
   savePlan(p); toast(`Copied ${n} planned session${n === 1 ? '' : 's'}`); rerender();
 }
 
-// One-way export of the visible week's plan: timed events where a time is set, otherwise all-day.
+// One-way export of the visible week's plan as all-day events; times are set in the calendar app.
 const icsText = s => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
 const icsFold = line => { let out = ''; while (line.length > 74) { out += line.slice(0, 74) + '\r\n '; line = line.slice(74); } return out + line; };
 function buildWeekIcs() {
@@ -580,18 +573,8 @@ function buildWeekIcs() {
       const r = S.routines.find(x => x.id === e.routineId);
       if (!r) continue;
       const exNames = r.items.map(it => S.ex.get(it.exId)?.name).filter(Boolean);
-      // Timed events use floating local time (no time zone), which calendars show as the phone's local time.
-      const when = e.time
-        ? (() => {
-          const [h, m] = e.time.split(':').map(Number);
-          const start = new Date(iso + 'T00:00:00'); start.setHours(h, m, 0, 0);
-          const mins = Math.max(15, Math.ceil(routineEst(r) / 60 / 5) * 5);
-          const end = new Date(start.getTime() + mins * 60000);
-          const f = d => `${localISO(d).replace(/-/g, '')}T${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}00`;
-          return [`DTSTART:${f(start)}`, `DTEND:${f(end)}`];
-        })()
-        : [`DTSTART;VALUE=DATE:${iso.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${next.replace(/-/g, '')}`, 'TRANSP:TRANSPARENT'];
-      lines.push('BEGIN:VEVENT', `UID:${e.id}@workout-jfp`, `DTSTAMP:${stamp}`, ...when,
+      lines.push('BEGIN:VEVENT', `UID:${e.id}@workout-jfp`, `DTSTAMP:${stamp}`,
+        `DTSTART;VALUE=DATE:${iso.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${next.replace(/-/g, '')}`, 'TRANSP:TRANSPARENT',
         `SUMMARY:${icsText(r.name)}`, `DESCRIPTION:${icsText([`~${fmtLength(routineEst(r))}`, ...exNames].join('\n'))}`, 'END:VEVENT');
     }
   }
@@ -600,20 +583,43 @@ function buildWeekIcs() {
     .map(icsFold).join('\r\n') + '\r\n';
   return { name: `${FILE_PREFIX}-week-${localISO(mon)}.ics`, text };
 }
-// Store the .ics in the local cache and navigate to it, so the service worker serves it as a real
-// text/calendar page: iOS then shows its "Add events" screen (tested and confirmed on iPhone), and
-// Android hands it to a calendar app. Nothing leaves the phone. Without a service worker
-// (e.g. a plain browser tab on a computer) it falls back to a download.
-const ICS_URL = './export/week.ics';
-async function calExport() {
-  const ics = buildWeekIcs();
-  if (!ics) return toast('Nothing planned this week');
-  if (!('caches' in window) || !navigator.serviceWorker?.controller) return deliver(ics.name, ics.text, 'text/calendar');
-  const cache = await caches.open(`${FILE_PREFIX}-export`);
-  await cache.put(new URL(ICS_URL, location.href).href, new Response(ics.text, {
+// "Add week to Calendar" is a plain link to a .ics file held in the local cache, which the service
+// worker serves as text/calendar: iOS then shows its "Add events" screen and Android hands it to a
+// calendar app. Nothing leaves the phone.
+//  - The file is written when the Train tab renders, so the tap itself is an ordinary link tap with
+//    no waiting in between (iOS only reliably opens files from a direct tap).
+//  - Each version of the week's plan gets its own address, so the phone never reuses an older copy.
+//  - Without a service worker (a plain browser tab on a computer) the tap falls back to a download.
+const ICS_CACHE = `${FILE_PREFIX}-export`;
+const strHash = t => { let h = 5381; for (let i = 0; i < t.length; i++) h = (h * 33 ^ t.charCodeAt(i)) >>> 0; return h.toString(36); };
+const icsUrl = ics => `./export/${ics.name.replace(/\.ics$/, '')}-${strHash(ics.text)}.ics`;
+async function cacheIcs(ics, url) {
+  if (!('caches' in window)) return false;
+  const cache = await caches.open(ICS_CACHE);
+  const full = new URL(url, location.href).href;
+  for (const k of await cache.keys()) if (k.url !== full) await cache.delete(k);
+  if (!(await cache.match(full))) await cache.put(full, new Response(ics.text, {
     headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': `inline; filename="${ics.name}"` },
   }));
-  location.href = ICS_URL;
+  UI.icsReady = url;
+  return true;
+}
+function icsLink() {
+  const ics = buildWeekIcs();
+  if (!ics) return `<button class="link" data-act="planIcs">Add week to Calendar</button>`;
+  const url = icsUrl(ics);
+  if (UI.icsReady !== url) onMount(() => { cacheIcs(ics, url).catch(() => { }); });
+  return `<a class="link" href="${url}" data-act="planIcs" data-v="${url}">Add week to Calendar</a>`;
+}
+function calExport(d, ev) {
+  if (!d.v) return toast('Nothing planned this week');
+  const ics = buildWeekIcs();
+  if (!ics) { ev.preventDefault(); return toast('Nothing planned this week'); }
+  if (!navigator.serviceWorker?.controller) { ev.preventDefault(); return deliver(ics.name, ics.text, 'text/calendar'); }
+  if (UI.icsReady === d.v) return;   // let the link open normally
+  // Not cached yet (tapped straight after a change): write it, then open it.
+  ev.preventDefault();
+  cacheIcs(ics, d.v).then(() => { location.href = d.v; }).catch(() => deliver(ics.name, ics.text, 'text/calendar'));
 }
 
 // ---------------- Routine editor ----------------
@@ -1535,7 +1541,7 @@ const ACT = {
     if (!r.name.trim()) r.name = 'Untitled routine';
     await putRoutine(r); toast('Routine saved'); go('train');
   },
-  planIcs: () => calExport(),
+  planIcs: (d, el, ev) => calExport(d, ev),
   // history calendar
   hview: d => { UI.hview = d.v; UI.hday = null; rerender(); },
   hnav: d => {
@@ -1659,15 +1665,6 @@ const CH = {
     setMeta('settings', { ...(S.meta.settings || {}), [d.key]: n }); toast('Saved');
   },
   sessTime: (d, v) => { if (!v) return; UI.draft[d.key] = new Date(v).getTime(); },
-  planTime: (d, v) => {
-    const p = { ...plan() };
-    p[d.v] = (p[d.v] || []).map(e => {
-      if (e.id !== d.id) return e;
-      const { time, ...rest } = e;
-      return /^\d{2}:\d{2}$/.test(v) ? { ...rest, time: v } : rest;
-    });
-    savePlan(p); rerender();
-  },
   catColor: (d, v) => {
     if (!/^#[0-9a-f]{6}$/i.test(v)) return;
     setMeta('settings', { ...(S.meta.settings || {}), catColors: { ...(cfg().catColors || {}), [d.v]: v } }); rerender();

@@ -337,11 +337,6 @@ select.in { appearance: none; -webkit-appearance: none; }
 .seg button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
 .weigh.st { grid-template-columns: 1fr 1fr; }
 
-/* Plan times */
-.ptime { position: relative; flex: none; font-size: 13px; font-weight: 650; color: var(--accent); padding: 6px 8px; border-radius: 8px; background: var(--accent-soft); cursor: pointer; }
-.ptime:not(.set) { background: none; color: var(--ink-3); }
-.ptime input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
-
 /* New exercise from routine / picker */
 .add-two { margin: 12px 0; }
 .pick.create { background: var(--accent-soft); }
