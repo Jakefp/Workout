@@ -8,6 +8,10 @@ export const MUSCLES = [
 
 export const CATEGORIES = ['Strength', 'Calisthenics', 'Stretch', 'Cardio'];
 
+// Bump when adding exercises, and give each new entry `since: <new version>`.
+// Existing installs then get just those entries added on load (skipping names they already have).
+export const SEED_VERSION = 1;
+
 const S = (name, muscles, perSide = false) => ({ name, type: 'weight', category: 'Strength', muscles, perSide });
 const C = (name, muscles, perSide = false) => ({ name, type: 'bodyweight', category: 'Calisthenics', muscles, perSide });
 const H = (name, muscles, perSide = false) => ({ name, type: 'hold', category: 'Calisthenics', muscles, perSide });

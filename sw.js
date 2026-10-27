@@ -1,6 +1,6 @@
 // Offline cache for the app shell. Bump VERSION whenever you change any file,
 // so phones pick up the new version (the app shows an "Update ready" prompt).
-const VERSION = 'workout_jfp-v1.1.0';
+const VERSION = 'workout_jfp-v1.3.1';
 const SHELL = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/app.js', './js/db.js', './js/util.js', './js/chart.js', './js/seed.js',

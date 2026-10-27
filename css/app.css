@@ -17,6 +17,10 @@
   --cat-calisthenics: #2f6fd6;
   --cat-stretch: #8a5cc7;
   --cat-cardio: #14968a;
+  --heat-lo: #fde3cf;
+  --heat-hi: #b8290f;
+  --gold: #c99a14;
+  --gold-soft: #fbf1d3;
   --radius: 14px;
   --tab-h: 60px;
   color-scheme: light dark;
@@ -41,6 +45,10 @@
     --cat-calisthenics: #6c9cff;
     --cat-stretch: #b48cf0;
     --cat-cardio: #3cc7b8;
+    --heat-lo: #4a2c1c;
+    --heat-hi: #f0461a;
+    --gold: #e8c252;
+    --gold-soft: #35301a;
   }
 }
 :root[data-theme="light"] { color-scheme: light; }
@@ -49,6 +57,7 @@
   --ink: #f2f0eb; --ink-2: #b9b5ac; --ink-3: #85817a; --accent: #ff7a45; --accent-ink: #1a0d06;
   --accent-soft: #3a2117; --done: #5cc285; --done-soft: #17291e; --danger: #ff7b6b; --chart-muted: #6e6a63;
   --cat-strength: #ff7a45; --cat-calisthenics: #6c9cff; --cat-stretch: #b48cf0; --cat-cardio: #3cc7b8;
+  --heat-lo: #4a2c1c; --heat-hi: #f0461a; --gold: #e8c252; --gold-soft: #35301a;
   color-scheme: dark;
 }
 
@@ -255,14 +264,24 @@ select.in { appearance: none; -webkit-appearance: none; }
 .cday:disabled { cursor: default; color: var(--ink-2); }
 .cday.out { opacity: .35; }
 .cday.today > span:first-child { color: var(--accent); font-weight: 750; }
-.cday.on { background: var(--surface-2); }
+.cday.on { background: var(--surface-2); box-shadow: inset 0 0 0 2px var(--ink); }
+/* Training heat: --h (0–100%) blends from easy (pale) to hard (deep red-orange). */
+.cday.hot, .ygrid i.hot { background: color-mix(in srgb, var(--heat-hi) var(--h, 0%), var(--heat-lo)); }
+.cday.hot { color: var(--ink); }
+.cday.hot.deep { color: #fff; }
+.cday.hot.today.deep > span:first-child { color: #fff; text-decoration: underline; }
+.cday.hot .cd { box-shadow: 0 0 0 1.5px var(--surface); }
+.heat-legend { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--ink-3); }
+.heat-legend i { width: 90px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--heat-lo), var(--heat-hi)); }
 .cdots { display: flex; gap: 2px; height: 6px; }
-.cd { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
-.c-strength { background: var(--cat-strength); }
-.c-calisthenics { background: var(--cat-calisthenics); }
-.c-stretch { background: var(--cat-stretch); }
-.c-cardio { background: var(--cat-cardio); }
-.c-none { background: var(--ink-3); }
+.cd { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex: none; }
+/* Category dot before an exercise or routine name */
+.item-name > .cd, .chip > .cd { width: 8px; height: 8px; margin-right: 7px; vertical-align: 1px; }
+.rdots { display: inline-flex; gap: 3px; margin-left: 8px; vertical-align: 2px; }
+.rdots .cd { width: 7px; height: 7px; }
+.muted > .cd { width: 8px; height: 8px; margin-right: 5px; }
+.muscles { font-size: 12px; color: var(--ink-3); margin-top: 1px; }
+.small { font-size: 13px; margin: -4px 0 14px; }
 .cat-legend { flex-wrap: wrap; gap: 6px 14px; justify-content: center; margin-top: 10px; font-size: 12px; }
 .cat-legend .cd { width: 8px; height: 8px; }
 .years { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -271,6 +290,26 @@ select.in { appearance: none; -webkit-appearance: none; }
 .ygrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
 .ygrid i { aspect-ratio: 1; border-radius: 2px; }
 .ygrid i:not([class]) { background: var(--line); }
+
+/* Personal records */
+.card.pr { box-shadow: inset 0 0 0 2px var(--gold); background: linear-gradient(var(--gold-soft), var(--surface) 70%); }
+.pr-tag { flex: none; font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; color: var(--gold); }
+.set-list li.pr { font-weight: 700; }
+.medal { font-size: 26px; }
+.set-row.pr-flash { box-shadow: inset 0 0 0 2px var(--gold); animation: prflash 1.2s ease-out; }
+@keyframes prflash { 0% { background: var(--gold-soft); } 100% { background: var(--done-soft); } }
+
+/* Settings: categories */
+.cat-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 15px; }
+.swatch { position: relative; width: 30px; height: 30px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--ink) 12%, transparent); cursor: pointer; }
+.swatch input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.cat-add { display: flex; gap: 8px; margin-top: 12px; }
+.cat-add .in { text-align: left; }
+
+/* What's new */
+.news { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.news-i { font-size: 24px; line-height: 1.2; width: 32px; text-align: center; flex: none; }
+.news p { margin: 2px 0 0; }
 
 /* Effort */
 .effort { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }

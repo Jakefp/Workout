@@ -259,16 +259,53 @@ export function estimateSec(items, exMap, cfg) {
   return total;
 }
 
+// ---------- Personal records ----------
+
+// Score for one set; the highest-scoring set ever is the PR. null = can't be scored.
+//   weight: kg × reps (volume), so 20 kg × 10 beats 40 kg × 4
+//   bodyweight: reps × (bodyweight + added kg)
+//   hold/stretch: longest time
+//   interval: watts × minutes (work); rower/ski split converts to watts; runs use distance (time / pace)
+//   steady: distance, else distance from time / pace
+export function setScore(ex, s, bw = 75) {
+  const kg = num(s.kg), reps = num(s.reps), time = num(s.time), pace = num(s.pace);
+  switch (ex.type) {
+    case 'weight': return kg && reps ? kg * reps : null;
+    case 'bodyweight': return reps ? reps * (bw + (kg || 0)) : null;
+    case 'hold': case 'stretch': return time || null;
+    case 'interval': {
+      if (!time) return null;
+      if (ex.modality === 'run') return pace ? time / pace : null;
+      const split = num(s.split);
+      const w = num(s.watts) || (split ? 2.8 / Math.pow(split / 500, 3) : null);
+      return w ? w * time / 60 : null;
+    }
+    case 'steady': return num(s.dist) || (time && pace ? time / pace : null);
+  }
+  return null;
+}
+
 // ---------- Progress metrics ----------
 
 const done = it => (it.sets || []).filter(s => s.done !== false);
 const avg = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
 
+// Sets × reps: every rep logged in the session.
+const totalReps = {
+  key: 'treps', label: 'Total reps', unit: 'reps',
+  get(it) {
+    const d = done(it).filter(s => num(s.reps) !== null);
+    const r = d.reduce((t, s) => t + num(s.reps), 0);
+    return d.length ? { y: r, label: `${r} reps (${d.length} set${d.length === 1 ? '' : 's'})` } : null;
+  },
+  fmt: v => `${fmtNum(v)}`,
+};
+
 // Returns metric definitions available for an exercise. First is the default.
 export function metricsFor(ex) {
   switch (ex.type) {
     case 'weight': return [{
-      key: 'top', label: 'Top set', unit: 'kg',
+      key: 'top', label: 'Max weight', unit: 'kg',
       get(it) {
         let best = null;
         for (const s of done(it)) {
@@ -279,13 +316,21 @@ export function metricsFor(ex) {
         return best ? { y: best.kg, label: `${fmtNum(best.kg)} kg × ${best.reps}` } : null;
       },
       fmt: v => `${fmtNum(v)} kg`,
-    }];
+    }, {
+      key: 'volume', label: 'Volume', unit: 'kg',
+      get(it) {
+        const v = done(it).reduce((t, s) => t + (num(s.kg) || 0) * (num(s.reps) || 0), 0);
+        return v ? { y: v, label: `${fmtNum(v)} kg total` } : null;
+      },
+      fmt: v => `${fmtNum(Math.round(v))} kg`,
+    }, totalReps];
     case 'bodyweight': return [
       {
         key: 'reps', label: 'Max reps', unit: 'reps',
         get(it) { const r = done(it).map(s => num(s.reps)).filter(v => v !== null); return r.length ? { y: Math.max(...r), label: `${Math.max(...r)} reps` } : null; },
         fmt: v => `${fmtNum(v)}`,
       },
+      totalReps,
       {
         key: 'load', label: 'Reps × added kg', unit: '',
         get(it) {

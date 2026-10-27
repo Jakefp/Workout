@@ -25,7 +25,8 @@ All user data lives in IndexedDB on the phone (DB `setlog`; stores `exercises`, 
   - Never rename IndexedDB stores, keys or record fields, and never delete stores.
   - If the data shape must change, add a migration that upgrades existing records on load. Records saved by older versions must still load and render correctly.
   - Keep `DB_NAME` as `setlog`. Only increase `DB_VERSION`, and only together with an `onupgradeneeded` migration.
-- `seed.js` only runs on a fresh install. New seed exercises won't reach the existing install unless a migration adds them, checking by name to avoid duplicates.
+- `seed.js` only runs in full on a fresh install. To add library exercises for existing installs, bump `SEED_VERSION` and give each new entry `since: <new SEED_VERSION>`. `loadAll` adds those entries on the next load, skipping names that already exist (case-insensitive).
+- Add a `WHATS_NEW` entry in `js/app.js` for user-visible changes. It is shown once per `APP_VERSION` to existing users (meta `seenVersion`).
 - Use relative paths only (`./`, `js/…`), because the site is served from `/<repo-name>/`. Don't rename the repo: that changes the URL, and the phone would treat it as a new app with empty storage.
 - Never commit backup or export files (`setlog-*.json`, `workout_jfp-*.json`, `*.csv`, `*.ics`). They contain personal data and the repo is public.
 - No network calls, analytics or external CDNs. Everything must work offline.
@@ -48,5 +49,9 @@ All user data lives in IndexedDB on the phone (DB `setlog`; stores `exercises`, 
   - Times are stored in seconds.
   - `effort` (1–5, optional: 1 easy, 3 moderate, 5 all-out) was added in v1.1.0. Older sessions don't have it. It is intended as the intensity input for a future fitness/fatigue chart.
 - **Weight:** `{ date: 'YYYY-MM-DD', kg }`, one per day.
-- **Meta:** `{ key, value }`. Keys: `active` (in-progress session), `settings` (estimate numbers plus `theme`: auto | light | dark), `plan`, `lastBackup`, `firstUse`, `seeded`.
+- **Meta:** `{ key, value }`. Keys: `active` (in-progress session), `settings`, `plan`, `lastBackup`, `firstUse`, `seeded`, `seedVersion` (v1.3.1), `seenVersion` (v1.3.1, last What's new shown).
+- **Settings** (meta `settings`): estimate numbers (`secPerRep`, `minSetSec`, `changeoverSec`), `theme` (auto | light | dark), `catColors` (`{ category: '#rrggbb' }` overrides), `customCats` (user-added category names; built-ins are `CATEGORIES` in `seed.js`).
+- **Personal records** are derived, never stored: `setScore` in `util.js`, `prIndex` in `app.js`.
+- **History shading** is derived: minutes × effort (unrated sessions count as 3), relative to the biggest day of the last 90 days.
+- **Calendar export:** "Open in Calendar" writes the .ics to the local cache `workout_jfp-export` at `./export/week.ics` and navigates there, so the service worker serves it. It never touches the network or the repo.
 - **Plan** (meta `plan`, v1.1.0): `{ 'YYYY-MM-DD': [{ id, routineId }] }`. A planned entry counts as done when a session with that `routineId` starts on that date. It is included in the JSON backup as `plan`.

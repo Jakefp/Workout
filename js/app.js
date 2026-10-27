@@ -1,15 +1,15 @@
 import { db } from './db.js';
-import { SEED_EXERCISES, MUSCLES, CATEGORIES } from './seed.js';
+import { SEED_EXERCISES, SEED_VERSION, MUSCLES, CATEGORIES } from './seed.js';
 import { renderChart } from './chart.js';
 import {
   uid, esc, DAY, parseDur, fmtDur, fmtLength, localISO, startOfWeek, addDays, fmtDate, fmtTime, num,
   TYPES, MODALITIES, isCardio, fieldsFor, fmtField, summariseSet, setLabel,
-  defaultTarget, targetFields, setFromTarget, blocks, estimateSec, metricsFor, rollingMean,
+  defaultTarget, targetFields, setFromTarget, blocks, estimateSec, metricsFor, rollingMean, setScore,
 } from './util.js';
 
 const APP_NAME = 'Workout_jfp';
 const FILE_PREFIX = 'workout_jfp';
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.3.1';
 const DEFAULT_CFG = { secPerRep: 3, minSetSec: 20, changeoverSec: 60 };
 const BACKUP_DAYS = 14;
 const THEMES = { auto: 'Auto', light: 'Light', dark: 'Dark' };
@@ -21,7 +21,19 @@ const UI = {
   exq: '', excat: 'All', exmus: '', exarch: false,
   wrange: '3M', metric: {}, draft: null, exDraft: null, picker: null, menu: null,
   week: null, pday: null, planAdd: false, hview: 'month', hcur: Date.now(), hday: null,
+  upd: {}, sheet: null, freshInstall: false,
 };
+
+// Shown once after updating to this version (and from Settings → What's new).
+const WHATS_NEW = [
+  ['🥇', 'Personal records', 'Your best-ever set gets a gold highlight in History and on the exercise page, and flashes gold live when you beat it. Weights count kg × reps; intervals count watts × minutes.'],
+  ['🔥', 'Training heat in History', 'Calendar days are shaded from light to deep orange by how hard they were: minutes trained × effort.'],
+  ['🎨', 'Category colours', 'Coloured dots next to exercises and routines. Change the colours, or add your own categories, in Settings.'],
+  ['📈', 'More exercise charts', 'Switch between Max weight, Volume and Total reps.'],
+  ['💾', 'Save routine', 'Save a routine without starting it.'],
+  ['🗓️', 'Calendar export', 'New ways to get your week plan into your calendar app.'],
+  ['⚙️', 'Updates in Settings', 'Check for updates and reopen this list any time.'],
+];
 const cfg = () => ({ ...DEFAULT_CFG, ...(S.meta.settings || {}) });
 // Weekly plan, stored in meta 'plan': { 'YYYY-MM-DD': [{ id, routineId }] }
 const plan = () => S.meta.plan || {};
@@ -46,9 +58,19 @@ async function loadAll() {
   S.routines = routines.sort((a, b) => (a.created || 0) - (b.created || 0));
   S.sessions = sessions; S.weights = weights;
   S.meta = Object.fromEntries(meta.map(m => [m.key, m.value]));
+  UI.freshInstall = !S.meta.firstUse;
+  const seedEx = ({ since, ...e }) => putEx({ id: uid(), archived: false, custom: false, modality: null, perSide: false, ...e });
   if (!S.ex.size && !S.meta.seeded) {
-    for (const e of SEED_EXERCISES) await putEx({ id: uid(), archived: false, custom: false, modality: null, perSide: false, ...e });
+    for (const e of SEED_EXERCISES) await seedEx(e);
     await setMeta('seeded', true);
+    await setMeta('seedVersion', SEED_VERSION);
+  } else if ((S.meta.seedVersion || 1) < SEED_VERSION) {
+    // Migration: add library exercises introduced after this install was seeded, skipping names that exist.
+    const have = new Set([...S.ex.values()].map(e => e.name.trim().toLowerCase()));
+    for (const e of SEED_EXERCISES) {
+      if ((e.since || 1) > (S.meta.seedVersion || 1) && !have.has(e.name.toLowerCase())) await seedEx(e);
+    }
+    await setMeta('seedVersion', SEED_VERSION);
   }
   if (!S.meta.firstUse) await setMeta('firstUse', Date.now());
 }
@@ -82,22 +104,68 @@ function planStatus(entries, sessions) {
   });
   return { entries: out, extra: left };
 }
-// Exercise count per category across a day's sessions.
-function catCounts(ss) {
+// ---------------- Personal records ----------------
+const bodyweight = () => [...S.weights].sort((a, b) => b.date.localeCompare(a.date))[0]?.kg || 75;
+// Best-ever set per exercise, once it has been logged in 2+ sessions: Map exId -> { v, setId, sessionId }.
+// Earliest set wins a tie. excludeId leaves one session out (the live one).
+function prIndex(excludeId, minSessions = 2) {
+  const bw = bodyweight();
+  const best = new Map(), seen = new Map();
+  for (const s of [...S.sessions].sort((a, b) => a.start - b.start)) {
+    if (s.id === excludeId) continue;
+    for (const it of s.items) {
+      const ex = S.ex.get(it.exId); if (!ex) continue;
+      if (!seen.has(ex.id)) seen.set(ex.id, new Set());
+      seen.get(ex.id).add(s.id);
+      for (const st of it.sets) {
+        if (st.done === false) continue;
+        const v = setScore(ex, st, bw);
+        if (v !== null && v > (best.get(ex.id)?.v ?? -Infinity)) best.set(ex.id, { v, setId: st.id, sessionId: s.id });
+      }
+    }
+  }
+  for (const id of [...best.keys()]) if (seen.get(id).size < minSessions) best.delete(id);
+  return best;
+}
+
+// ---------------- Categories & colours ----------------
+// Built-in categories plus any the user added in Settings (settings.customCats).
+const cats = () => [...CATEGORIES, ...(cfg().customCats || [])];
+const DEFAULT_CAT_HEX = { Strength: '#e2531c', Calisthenics: '#2f6fd6', Stretch: '#8a5cc7', Cardio: '#14968a' };
+const CUSTOM_HEX = ['#d4a017', '#c2378a', '#5b8c2a', '#0f7fbf', '#7a6a58'];
+const customHex = c => CUSTOM_HEX[Math.max(0, (cfg().customCats || []).indexOf(c)) % CUSTOM_HEX.length];
+// Hex for the colour picker; overrides live in settings.catColors.
+const catHex = c => cfg().catColors?.[c] || DEFAULT_CAT_HEX[c] || customHex(c);
+// CSS colour: built-ins without an override use the theme-aware tokens.
+const catColor = c => cfg().catColors?.[c]
+  || (CATEGORIES.includes(c) ? `var(--cat-${c.toLowerCase()})` : cats().includes(c) ? customHex(c) : 'var(--ink-3)');
+const catDot = c => `<i class="cd" style="background:${catColor(c)}" aria-hidden="true"></i>`;
+const exDot = ex => ex?.category ? catDot(ex.category) : '';
+function catCounts(items) {
   const n = {};
-  for (const s of ss) for (const it of s.items) { const c = S.ex.get(it.exId)?.category; if (c) n[c] = (n[c] || 0) + 1; }
+  for (const it of items) { const c = S.ex.get(it.exId)?.category; if (c) n[c] = (n[c] || 0) + 1; }
   return n;
 }
-const catClass = c => 'c-' + c.toLowerCase();
-const catDots = ss => {
-  const n = catCounts(ss);
-  const cats = CATEGORIES.filter(c => n[c]);
-  return (cats.length ? cats : ['none']).map(c => `<i class="cd ${catClass(c)}"></i>`).join('');
-};
-const topCat = ss => {
-  const n = catCounts(ss);
-  return CATEGORIES.reduce((best, c) => (n[c] || 0) > (n[best] || 0) ? c : best, 'none');
-};
+// One dot per category in a list of items, most-used first.
+function catDotsFor(items) {
+  const n = catCounts(items); const order = cats();
+  const list = Object.keys(n).sort((a, b) => n[b] - n[a] || order.indexOf(a) - order.indexOf(b));
+  return list.length ? list.map(catDot).join('') : catDot('');
+}
+const catDots = ss => catDotsFor(ss.flatMap(s => s.items));
+
+// Training load for the History shading: minutes × effort (unrated sessions count as 3).
+const sessionLoad = s => ((s.end ? s.end - s.start : (s.estSec || 0) * 1000) / 60000) * (s.effort || 3);
+const dayLoad = ss => ss.reduce((t, s) => t + sessionLoad(s), 0);
+// Reference "hard day": the biggest daily load in the last 90 days (at least 45 min at effort 3).
+function heatRef(byDay) {
+  const from = localISO(addDays(new Date(), -90));
+  let max = 135;
+  for (const [iso, ss] of byDay) if (iso >= from) max = Math.max(max, dayLoad(ss));
+  return max;
+}
+// 0–100 shade for a day; sqrt spreads the lighter end so short sessions still show.
+const heat = (ss, ref) => ss ? Math.round(Math.min(1, Math.sqrt(dayLoad(ss) / ref)) * 100) : 0;
 const backupDue = () => (S.sessions.length || S.weights.length) &&
   Date.now() - (S.meta.lastBackup || S.meta.firstUse || Date.now()) > BACKUP_DAYS * DAY;
 
@@ -289,7 +357,7 @@ function trainView() {
     return `
       <div class="card routine">
         <a class="routine-main" href="#/routine/${r.id}">
-          <div class="routine-name">${esc(r.name)}</div>
+          <div class="routine-name">${esc(r.name)}${n ? `<span class="rdots">${catDotsFor(r.items)}</span>` : ''}</div>
           <div class="muted">${n} exercise${n === 1 ? '' : 's'} · ~${fmtLength(routineEst(r))}${last ? ' · last ' + fmtDate(last.start, { day: 'numeric', month: 'short' }) : ''}</div>
         </a>
         <button class="btn" data-act="start" data-id="${r.id}" ${n ? '' : 'disabled'}>Start</button>
@@ -341,7 +409,7 @@ function weekHtml() {
       if (e.session) return doneRow(e.session);
       const r = S.routines.find(x => x.id === e.routineId);
       return `<div class="plan-row"><span class="pchk"><i class="pip ${sel < today ? 'missed' : ''}"></i></span>
-        ${r ? `<a class="grow" href="#/routine/${r.id}"><span class="item-name">${esc(r.name)}</span><span class="muted">~${fmtLength(routineEst(r))}</span></a>`
+        ${r ? `<a class="grow" href="#/routine/${r.id}"><span class="item-name">${esc(r.name)}<span class="rdots">${catDotsFor(r.items)}</span></span><span class="muted">~${fmtLength(routineEst(r))}</span></a>`
           : `<span class="grow muted">Deleted routine</span>`}
         ${r && sel === today && r.items.length ? `<button class="btn sm" data-act="start" data-id="${r.id}">Start</button>` : ''}
         <button class="icon" data-act="planDel" data-v="${sel}" data-id="${e.id}" aria-label="Remove from plan">✕</button></div>`;
@@ -387,7 +455,7 @@ function copyLastWeek() {
 // One-way export of the visible week's plan as all-day calendar events.
 const icsText = s => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
 const icsFold = line => { let out = ''; while (line.length > 74) { out += line.slice(0, 74) + '\r\n '; line = line.slice(74); } return out + line; };
-function exportWeekIcs() {
+function buildWeekIcs() {
   const mon = curMonday();
   const p = plan();
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
@@ -400,13 +468,32 @@ function exportWeekIcs() {
       const exNames = r.items.map(it => S.ex.get(it.exId)?.name).filter(Boolean);
       lines.push('BEGIN:VEVENT', `UID:${e.id}@workout-jfp`, `DTSTAMP:${stamp}`,
         `DTSTART;VALUE=DATE:${iso.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${next.replace(/-/g, '')}`,
-        `SUMMARY:${icsText(r.name)}`, `DESCRIPTION:${icsText([`~${fmtLength(routineEst(r))}`, ...exNames].join('\n'))}`, 'END:VEVENT');
+        `SUMMARY:${icsText(r.name)}`, 'TRANSP:TRANSPARENT', `DESCRIPTION:${icsText([`~${fmtLength(routineEst(r))}`, ...exNames].join('\n'))}`, 'END:VEVENT');
     }
   }
-  if (!lines.length) return toast('Nothing planned this week');
+  if (!lines.length) return null;
   const text = ['BEGIN:VCALENDAR', 'VERSION:2.0', `PRODID:-//${APP_NAME}//EN`, 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', ...lines, 'END:VCALENDAR']
     .map(icsFold).join('\r\n') + '\r\n';
-  deliver(`${FILE_PREFIX}-week-${localISO(mon)}.ics`, text, 'text/calendar');
+  return { name: `${FILE_PREFIX}-week-${localISO(mon)}.ics`, text };
+}
+// Three ways to hand the .ics to the phone (which one works best varies by device):
+//  open:  store it in the local cache and navigate to it, so the service worker serves it as a
+//         real text/calendar page (iOS then shows its "Add events" screen). Nothing leaves the phone.
+//  share: the share sheet / download (Save to Files, or pick a calendar app on Android).
+//  data:  navigate to a data: URL holding the file.
+const ICS_URL = './export/week.ics';
+async function calExport(how) {
+  const ics = buildWeekIcs();
+  if (!ics) return toast('Nothing planned this week');
+  if (how === 'share') { closeSheet(); return deliver(ics.name, ics.text, 'text/calendar'); }
+  if (how === 'data') { location.href = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(ics.text); return; }
+  if (!('caches' in window) || !navigator.serviceWorker?.controller) return alert('This option needs the installed app. Try Share / Save to Files instead.');
+  const cache = await caches.open(`${FILE_PREFIX}-export`);
+  await cache.put(new URL(ICS_URL, location.href).href, new Response(ics.text, {
+    headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': `inline; filename="${ics.name}"` },
+  }));
+  closeSheet();
+  location.href = ICS_URL;
 }
 
 // ---------------- Routine editor ----------------
@@ -429,6 +516,8 @@ function routineView(id) {
     <div class="est"><span class="muted">Estimated length</span> <b id="est">~${fmtLength(routineEst(r))}</b></div>
     ${body || `<div class="empty">Add the exercises for this routine. Targets and rest are set per exercise.</div>`}
     <button class="btn ghost wide" data-act="pickForRoutine" data-rid="${r.id}">+ Add exercises</button>
+    <button class="btn wide" data-act="saveRoutine" data-rid="${r.id}">Save routine</button>
+    <p class="muted center">Changes save as you go. Start it any time from Train.</p>
     <div class="danger-zone"><button class="link danger" data-act="deleteRoutine" data-rid="${r.id}">Delete routine</button></div>`;
 }
 
@@ -441,7 +530,7 @@ function routineItemHtml(r, it, lab, inGroup) {
     <div class="card item">
       <div class="item-h">
         <span class="badge">${lab[it.uid]}</span>
-        <div class="item-t"><div class="item-name">${esc(ex.name)}</div>${typeTag(ex)}</div>
+        <div class="item-t"><div class="item-name">${exDot(ex)}${esc(ex.name)}</div>${typeTag(ex)}</div>
         <button class="icon" data-act="menu" data-uid="${it.uid}" aria-label="Options">⋯</button>
       </div>
       ${open ? itemMenu('rt', r.id, it, r.items) : ''}
@@ -542,7 +631,7 @@ function sessionItemHtml(s, it, lab, mode, inGroup) {
     <div class="card item" id="it-${it.uid}">
       <div class="item-h">
         <span class="badge">${lab[it.uid]}</span>
-        <div class="item-t"><div class="item-name">${esc(ex.name)}</div>${typeTag(ex)}</div>
+        <div class="item-t"><div class="item-name">${exDot(ex)}${esc(ex.name)}</div>${typeTag(ex)}</div>
         <button class="icon" data-act="menu" data-uid="${it.uid}" aria-label="Options">⋯</button>
       </div>
       ${open ? itemMenu(mode, s.id, it, s.items) : ''}
@@ -561,6 +650,19 @@ function sessionItemHtml(s, it, lab, mode, inGroup) {
       </div>
       <textarea class="in note" rows="1" data-in="itemNote" data-mode="${mode}" data-uid="${it.uid}" placeholder="Note">${esc(it.note)}</textarea>
     </div>`;
+}
+
+// Flash gold when a ticked set beats the exercise's best from earlier sessions
+// (needs at least one earlier session, so the record spans 2+ logs once saved).
+function checkLivePr(sess, it, st, row) {
+  const ex = S.ex.get(it.exId); if (!ex) return;
+  const prev = prIndex(sess.id, 1).get(ex.id); if (!prev) return;
+  const bw = bodyweight();
+  const v = setScore(ex, st, bw); if (v === null || v <= prev.v) return;
+  const others = sess.items.filter(x => x.exId === ex.id).flatMap(x => x.sets).filter(x => x !== st && x.done);
+  if (others.some(x => (setScore(ex, x, bw) ?? -Infinity) >= v)) return;
+  row?.classList.add('pr-flash');
+  toast(`🥇 New personal record: ${summariseSet(ex, st)}`);
 }
 
 function tickElapsed() {
@@ -591,6 +693,8 @@ function histRange() {
 
 function historyCalendar(byDay, a, b) {
   const today = localISO();
+  const ref = heatRef(byDay);
+  const heatStyle = ss => { const h = heat(ss, ref); return ss ? ` style="--h:${h}%"` : ''; };
   if (UI.hview === 'year') {
     const y = a.getFullYear();
     return `<div class="years">${[...Array(12)].map((_, m) => {
@@ -599,7 +703,7 @@ function historyCalendar(byDay, a, b) {
       const len = new Date(y, m + 1, 0).getDate();
       const cells = '<i class="blank"></i>'.repeat(lead) + [...Array(len)].map((_, i) => {
         const ss = byDay.get(localISO(new Date(y, m, i + 1)));
-        return ss ? `<i class="${catClass(topCat(ss))}"></i>` : '<i></i>';
+        return ss ? `<i class="hot"${heatStyle(ss)}></i>` : '<i></i>';
       }).join('');
       return `<button class="ymonth" data-act="hmonth" data-v="${m}"><b>${fmtDate(first, { month: 'short' })}</b><span class="ygrid">${cells}</span></button>`;
     }).join('')}</div>`;
@@ -608,7 +712,8 @@ function historyCalendar(byDay, a, b) {
   for (let d = startOfWeek(a); d < b || days.length % 7; d = addDays(d, 1)) days.push(d);
   return `<div class="cal">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map(x => `<span class="cal-h">${x}</span>`).join('')}${days.map(d => {
     const iso = localISO(d); const ss = byDay.get(iso);
-    return `<button class="cday${d < a || d >= b ? ' out' : ''}${iso === today ? ' today' : ''}${iso === UI.hday ? ' on' : ''}" data-act="hday" data-v="${iso}" ${ss ? '' : 'disabled'}>
+    const h = ss ? heat(ss, ref) : 0;
+    return `<button class="cday${ss ? ' hot' : ''}${h > 55 ? ' deep' : ''}${d < a || d >= b ? ' out' : ''}${iso === today ? ' today' : ''}${iso === UI.hday ? ' on' : ''}" data-act="hday" data-v="${iso}" ${ss ? heatStyle(ss) : 'disabled'}>
       <span>${d.getDate()}</span><span class="cdots">${ss ? catDots(ss) : ''}</span></button>`;
   }).join('')}</div>`;
 }
@@ -641,7 +746,8 @@ function historyView() {
       <button class="link" data-act="hnav" data-v="0">Today</button>
       <button class="icon" data-act="hnav" data-v="1" aria-label="Next">›</button></div></div>
     <div class="card">${historyCalendar(byDay, a, b)}
-      <div class="legend cat-legend">${CATEGORIES.map(c => `<span><i class="cd ${catClass(c)}"></i>${c}</span>`).join('')}</div></div>
+      <div class="legend cat-legend">${cats().map(c => `<span>${catDot(c)}${esc(c)}</span>`).join('')}</div>
+      <div class="heat-legend"><span>Easier</span><i></i><span>Harder</span></div></div>
     <div class="sec-h"><h2>${UI.hday ? esc(longDay(UI.hday)) : `${n} session${n === 1 ? '' : 's'}`}</h2>
       ${UI.hday ? `<button class="link" data-act="hday" data-v="${UI.hday}">Show all</button>` : total ? `<span class="muted">${fmtLength(total)} total</span>` : ''}</div>
     ${rows || `<div class="empty">${S.sessions.length ? 'No sessions in this period.' : 'Finished sessions appear here.'}</div>`}`;
@@ -651,13 +757,19 @@ function sessionDetailView(id) {
   const s = S.sessions.find(x => x.id === id);
   if (!s) return header('Session', { back: '#/history' }) + `<div class="empty">Session not found.</div>`;
   const lab = labelsFor(s.items);
+  const prs = prIndex();
   const body = blocks(s.items).map(b => {
     const inner = b.items.map(it => {
       const ex = S.ex.get(it.exId) || { name: 'Deleted exercise', type: 'weight' };
-      return `<div class="card item">
+      const pr = prs.get(it.exId);
+      const hasPr = pr && pr.sessionId === s.id && it.sets.some(st => st.id === pr.setId);
+      return `<div class="card item${hasPr ? ' pr' : ''}">
         <div class="item-h"><span class="badge">${lab[it.uid]}</span>
-          <div class="item-t">${ex.id ? `<a class="item-name" href="#/exercise/${ex.id}">${esc(ex.name)}</a>` : `<div class="item-name">${esc(ex.name)}</div>`}</div></div>
-        <ol class="set-list">${it.sets.map(st => `<li>${esc(summariseSet(ex, st))}</li>`).join('')}</ol>
+          <div class="item-t">${ex.id ? `<a class="item-name" href="#/exercise/${ex.id}">${exDot(ex)}${esc(ex.name)}</a>` : `<div class="item-name">${esc(ex.name)}</div>`}</div>
+          ${hasPr ? '<span class="pr-tag">Personal record</span>' : ''}</div>
+        <ol class="set-list">${it.sets.map(st => hasPr && st.id === pr.setId
+          ? `<li class="pr">${esc(summariseSet(ex, st))} <span aria-label="Personal record">🥇</span></li>`
+          : `<li>${esc(summariseSet(ex, st))}</li>`).join('')}</ol>
         ${it.note ? `<div class="note-ro">${esc(it.note)}</div>` : ''}</div>`;
     }).join('');
     return b.items.length > 1 ? `<div class="superset"><div class="ss-h"><span class="eyebrow">Superset</span></div>${inner}</div>` : inner;
@@ -713,8 +825,9 @@ function exerciseRows(list) {
   const counts = {};
   for (const s of S.sessions) for (const it of s.items) counts[it.exId] = (counts[it.exId] || 0) + 1;
   return list.map(e => `<a class="card row" href="#/exercise/${e.id}">
-      <div class="grow"><div class="item-name">${esc(e.name)}</div>
-      <div class="muted">${esc(TYPES[e.type])}${e.muscles?.length ? ' · ' + esc(e.muscles.join(', ')) : ''}</div></div>
+      <div class="grow"><div class="item-name">${exDot(e)}${esc(e.name)}</div>
+      <div class="muted">${esc(TYPES[e.type])}${e.modality ? ' · ' + esc(MODALITIES[e.modality]) : ''}</div>
+      ${e.muscles?.length ? `<div class="muscles">${esc(e.muscles.join(' · '))}</div>` : ''}</div>
       ${counts[e.id] ? `<span class="count">${counts[e.id]}</span>` : ''}<span class="chev">›</span></a>`).join('')
     || `<div class="empty">No exercises match.</div>`;
 }
@@ -724,7 +837,7 @@ function filterBar(prefix) {
   const mus = prefix === 'pk' ? st.mus : UI.exmus;
   return `
     <input class="in search" type="search" placeholder="Search exercises" data-in="${prefix}q" value="${esc(prefix === 'pk' ? st.q : UI.exq)}">
-    <div class="chips">${['All', ...CATEGORIES].map(c => `<button class="chip ${cat === c ? 'on' : ''}" data-act="${prefix}cat" data-v="${c}">${c}</button>`).join('')}
+    <div class="chips">${['All', ...cats()].map(c => `<button class="chip ${cat === c ? 'on' : ''}" data-act="${prefix}cat" data-v="${esc(c)}">${c === 'All' ? 'All' : catDot(c) + esc(c)}</button>`).join('')}
       <select class="chip sel" data-ch="${prefix}mus" aria-label="Muscle group"><option value="">All muscles</option>${MUSCLES.map(m => `<option ${mus === m ? 'selected' : ''}>${m}</option>`).join('')}</select>
     </div>`;
 }
@@ -743,6 +856,9 @@ function exerciseDetailView(id) {
   const mkey = UI.metric[id] || metrics[0]?.key;
   const metric = metrics.find(m => m.key === mkey) || metrics[0];
   const hist = sessionsDesc().flatMap(s => s.items.filter(i => i.exId === id).map(it => ({ s, it })));
+  const pr = prIndex().get(id);
+  const prSet = pr && S.sessions.find(s => s.id === pr.sessionId)?.items.flatMap(it => it.sets).find(st => st.id === pr.setId);
+  const prSess = pr && S.sessions.find(s => s.id === pr.sessionId);
   if (metric) onMount(() => {
     const pts = hist.map(({ s, it }) => { const v = metric.get(it); return v && { x: s.start, y: v.y, label: v.label }; }).filter(Boolean);
     renderChart(document.getElementById('exchart'), {
@@ -753,17 +869,20 @@ function exerciseDetailView(id) {
   return `
     ${header('Exercise', { back: '#/exercises', right: `<a class="btn sm ghost" href="#/exercise-edit/${id}">Edit</a>` })}
     <h2 class="big">${esc(ex.name)}</h2>
-    <div class="muted">${esc(ex.category)}${ex.muscles?.length ? ' · ' + esc(ex.muscles.join(', ')) : ''}</div>
-    ${typeTag(ex)} ${ex.archived ? '<span class="tag warn">Archived</span>' : ''}
+    <div class="muted">${exDot(ex)}${esc(ex.category)} · ${typeTag(ex)} ${ex.archived ? '<span class="tag warn">Archived</span>' : ''}</div>
+    ${ex.muscles?.length ? `<div class="muscles">${esc(ex.muscles.join(' · '))}</div>` : ''}
+    ${prSet ? `<a class="card row pr" href="#/history/${prSess.id}"><span class="medal" aria-hidden="true">🥇</span>
+      <div class="grow"><div class="muted">Personal record · ${fmtDate(prSess.start, { day: 'numeric', month: 'short', year: 'numeric' })}</div>
+      <b>${esc(summariseSet(ex, prSet))}</b></div><span class="chev">›</span></a>` : ''}
     ${metric ? `<section class="card">
       <div class="sec-h"><h2>${esc(metric.label)}</h2></div>
       ${metrics.length > 1 ? `<div class="chips">${metrics.map(m => `<button class="chip ${m.key === metric.key ? 'on' : ''}" data-act="metric" data-id="${id}" data-v="${m.key}">${esc(m.label)}</button>`).join('')}</div>` : ''}
       <div id="exchart" class="chart"></div></section>` : ''}
     <section><div class="sec-h"><h2>History</h2><span class="muted">${hist.length} session${hist.length === 1 ? '' : 's'}</span></div>
-      ${hist.slice(0, 50).map(({ s, it }) => `<a class="card row" href="#/history/${s.id}">
+      ${hist.slice(0, 50).map(({ s, it }) => { const isPr = pr && s.id === pr.sessionId && it.sets.some(x => x.id === pr.setId); return `<a class="card row${isPr ? ' pr' : ''}" href="#/history/${s.id}">
         <div class="grow"><div class="muted">${fmtDate(s.start, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })} · ${esc(s.name)}</div>
-        <div>${it.sets.map(x => esc(summariseSet(ex, x))).join('<span class="sep"> · </span>')}</div>
-        ${it.note ? `<div class="note-ro">${esc(it.note)}</div>` : ''}</div></a>`).join('') || `<div class="empty">Not logged yet.</div>`}
+        <div>${it.sets.map(x => esc(summariseSet(ex, x)) + (isPr && x.id === pr.setId ? ' 🥇' : '')).join('<span class="sep"> · </span>')}</div>
+        ${it.note ? `<div class="note-ro">${esc(it.note)}</div>` : ''}</div></a>`; }).join('') || `<div class="empty">Not logged yet.</div>`}
     </section>
     <div class="danger-zone">
       <button class="link" data-act="archive" data-id="${id}">${ex.archived ? 'Unarchive' : 'Archive'}</button>
@@ -791,7 +910,8 @@ function exerciseEditView(id) {
       <select class="in" data-ch="exMod" ${used ? 'disabled' : ''}>${Object.entries(MODALITIES).map(([k, v]) => `<option value="${k}" ${d.modality === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>`
       : `<label class="toggle"><input type="checkbox" data-ch="exSide" ${d.perSide ? 'checked' : ''}> Logged per side (left/right)</label>`}
     <label class="field"><span>Category</span>
-      <select class="in" data-ch="exCat">${CATEGORIES.map(c => `<option ${d.category === c ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
+      <select class="in" data-ch="exCat">${[...new Set([...cats(), d.category])].map(c => `<option ${d.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <small class="muted">Add your own categories in Settings.</small></label>
     <div class="field"><span>Muscle groups</span>
       <div class="chips">${MUSCLES.map(m => `<button class="chip ${d.muscles.includes(m) ? 'on' : ''}" data-act="exMus" data-v="${m}">${m}</button>`).join('')}</div></div>
     <button class="btn wide" data-act="saveEx">Save exercise</button>`;
@@ -852,6 +972,20 @@ function settingsView() {
       <p class="muted">Auto follows your phone’s light/dark setting.</p>
     </section>
     <section class="card">
+      <h2>Categories</h2>
+      <p class="muted">Tap a colour to change it. These colour the dots on exercises, routines and History.</p>
+      ${cats().map(cat => {
+        const custom = !CATEGORIES.includes(cat);
+        const n = [...S.ex.values()].filter(e => e.category === cat).length;
+        return `<div class="cat-row">
+          <label class="swatch" style="background:${catColor(cat)}" aria-label="Colour for ${esc(cat)}"><input type="color" value="${catHex(cat)}" data-ch="catColor" data-v="${esc(cat)}"></label>
+          <span class="grow">${esc(cat)} <span class="muted">· ${n} exercise${n === 1 ? '' : 's'}</span></span>
+          ${c.catColors?.[cat] ? `<button class="link muted" data-act="catReset" data-v="${esc(cat)}">Reset</button>` : ''}
+          ${custom ? `<button class="icon" data-act="delCat" data-v="${esc(cat)}" aria-label="Remove ${esc(cat)}">✕</button>` : ''}</div>`;
+      }).join('')}
+      <div class="cat-add"><input class="in" id="newcat" maxlength="24" placeholder="New category, e.g. CrossFit"><button class="btn sm" data-act="addCat">Add</button></div>
+    </section>
+    <section class="card">
       <h2>Backup</h2>
       <p class="muted">Your data only lives on this phone. Back up to Files / iCloud Drive regularly. Last backup: <b>${S.meta.lastBackup ? fmtDate(S.meta.lastBackup, { day: 'numeric', month: 'short', year: 'numeric' }) : 'never'}</b>.</p>
       <button class="btn wide" data-act="exportJSON">Back up (JSON)</button>
@@ -873,7 +1007,44 @@ function settingsView() {
       <p class="muted" id="persist">Checking…</p>
       <p class="muted">${S.sessions.length} sessions · ${S.routines.length} routines · ${S.ex.size} exercises · ${S.weights.length} weigh-ins</p>
     </section>
+    <section class="card">
+      <h2>Updates</h2>
+      <p class="muted">You’re on <b>${APP_NAME} v${APP_VERSION}</b>.${UI.upd.msg ? ' ' + esc(UI.upd.msg) : ''}</p>
+      ${UI.upd.ready ? `<button class="btn wide" data-act="reload">Update now${UI.upd.latest ? ' to v' + esc(UI.upd.latest) : ''}</button>` : ''}
+      <div class="two">
+        <button class="btn ghost" data-act="checkUpdate" ${UI.upd.busy ? 'disabled' : ''}>${UI.upd.busy ? 'Checking…' : 'Check for updates'}</button>
+        <button class="btn ghost" data-act="whatsNew">What’s new</button>
+      </div>
+    </section>
     <p class="muted center">${APP_NAME} v${APP_VERSION}</p>`;
+}
+
+// ---------------- Updates ----------------
+let swReg = null;
+const markUpdateReady = latest => {
+  UI.upd = { ...UI.upd, ready: true, busy: false, latest: latest || UI.upd.latest, msg: 'A new version is ready.' };
+  if (route().name === 'settings') rerender();
+};
+// Reads VERSION from the server's sw.js, e.g. 'workout_jfp-v1.3.1' -> '1.3.1'.
+async function latestVersion() {
+  const txt = await (await fetch('./sw.js', { cache: 'no-store' })).text();
+  return txt.match(/VERSION\s*=\s*'[^']*?v([\d.]+)'/)?.[1] || null;
+}
+async function checkUpdate() {
+  if (!swReg) { UI.upd.msg = 'Updates are only available in the installed app.'; return rerender(); }
+  UI.upd = { ...UI.upd, busy: true, msg: '' }; rerender();
+  let latest = null;
+  try { await swReg.update(); latest = await latestVersion(); } catch {
+    UI.upd = { ...UI.upd, busy: false, msg: 'Couldn’t check. Are you offline?' }; return rerender();
+  }
+  if (!latest || latest === APP_VERSION) { UI.upd = { ...UI.upd, busy: false, ready: false, msg: 'You’re on the latest version.' }; return rerender(); }
+  // A newer version exists: wait for its service worker to finish installing, then offer a reload.
+  const nw = swReg.installing || swReg.waiting;
+  if (nw && nw.state !== 'activated') await new Promise(r => {
+    nw.addEventListener('statechange', () => { if (nw.state === 'activated' || nw.state === 'redundant') r(); });
+    setTimeout(r, 15000);
+  });
+  markUpdateReady(latest);
 }
 
 function applyTheme() {
@@ -899,11 +1070,40 @@ function pickerList() {
   const list = exList().filter(e => !e.archived && (p.cat === 'All' || e.category === p.cat) &&
     (!p.mus || (e.muscles || []).includes(p.mus)) && (!q || e.name.toLowerCase().includes(q)));
   return list.map(e => `<button class="pick ${p.sel.has(e.id) ? 'on' : ''}" data-act="pick" data-id="${e.id}">
-      <span class="grow"><span class="item-name">${esc(e.name)}</span><span class="muted">${esc(TYPES[e.type])}</span></span>
+      <span class="grow"><span class="item-name">${exDot(e)}${esc(e.name)}</span><span class="muted">${esc(TYPES[e.type])}${e.muscles?.length ? ' · ' + esc(e.muscles.join(', ')) : ''}</span></span>
       <span class="check">${p.sel.has(e.id) ? '✓' : ''}</span></button>`).join('') || `<div class="empty">No matches. <a href="#/exercise-edit/new" data-act="closeSheet">Create an exercise</a></div>`;
 }
+function sheetFrame(title, body) {
+  return `<div class="scrim" data-act="closeSheet"></div>
+    <div class="sheet" role="dialog" aria-label="${esc(title)}">
+      <div class="sheet-h"><span></span><b>${esc(title)}</b><button class="link strong" data-act="closeSheet">Done</button></div>
+      <div class="pick-list">${body}</div>
+    </div>`;
+}
+const newsHtml = () => sheetFrame(`What’s new in v${APP_VERSION}`, `
+  ${WHATS_NEW.map(([icon, t, d]) => `<div class="news"><span class="news-i" aria-hidden="true">${icon}</span><div><b>${esc(t)}</b><p class="muted">${esc(d)}</p></div></div>`).join('')}
+  <button class="btn wide" data-act="closeSheet">Got it</button>`);
+const calHtml = () => sheetFrame('Add week to calendar', `
+  <p class="muted">Adds this week’s planned routines as all-day events. The file is made on your phone and never uploaded.</p>
+  <button class="btn wide" data-act="calOpen">Open in Calendar</button>
+  <p class="muted small">Best on iPhone: opens the Calendar “Add events” screen. If you end up on a page of text, close and reopen the app, then try the next option.</p>
+  <button class="btn ghost wide" data-act="calShare">Share / Save to Files</button>
+  <p class="muted small">Save to Files, then tap the file in the Files app and choose Add to Calendar. On Android, pick your calendar app.</p>
+  <button class="btn ghost wide" data-act="calData">Open as file</button>
+  <p class="muted small">Alternative method, in case the first one doesn’t work on your phone.</p>`);
+function openSheet(kind) { UI.sheet = kind; renderSheet(); }
+function closeSheet() {
+  if (UI.sheet === 'news') setMeta('seenVersion', APP_VERSION);
+  UI.sheet = null; UI.picker = null; renderSheet();
+}
+
 function renderSheet() {
   const el = document.getElementById('sheet');
+  if (UI.sheet) {
+    el.classList.add('open'); document.body.classList.add('noscroll');
+    el.innerHTML = UI.sheet === 'news' ? newsHtml() : calHtml();
+    return;
+  }
   const p = UI.picker;
   if (!p) { el.innerHTML = ''; el.classList.remove('open'); document.body.classList.remove('noscroll'); return; }
   el.classList.add('open'); document.body.classList.add('noscroll');
@@ -967,10 +1167,11 @@ async function importFile(file) {
   let data;
   try { data = JSON.parse(await file.text()); } catch { return alert('That file isn’t valid JSON.'); }
   if (data?.app !== 'setlog' || !Array.isArray(data.exercises)) return alert(`That doesn’t look like a ${APP_NAME} backup.`);
-  if (!confirm(`Replace ALL data on this phone with the backup from ${data.exportedAt?.slice(0, 10) || 'unknown date'}?\n\n${data.sessions?.length || 0} sessions · ${data.routines?.length || 0} routines · ${data.weights?.length || 0} weigh-ins`)) return;
+  const planDays = Object.keys(data.plan || {}).length;
+  if (!confirm(`Replace ALL data on this phone with the backup from ${data.exportedAt?.slice(0, 10) || 'unknown date'}?\n\n${data.sessions?.length || 0} sessions · ${data.routines?.length || 0} routines · ${data.weights?.length || 0} weigh-ins · ${planDays} planned day${planDays === 1 ? '' : 's'}${'plan' in data ? '' : '\n\nThis backup was made with an older version, so it has no week plan.'}`)) return;
   await db.replaceAll({
     exercises: data.exercises, routines: data.routines || [], sessions: data.sessions || [], weights: data.weights || [],
-    meta: [{ key: 'settings', value: data.settings || {} }, { key: 'plan', value: data.plan || {} }, { key: 'seeded', value: true }, { key: 'firstUse', value: Date.now() }, { key: 'lastBackup', value: Date.now() }],
+    meta: [{ key: 'settings', value: data.settings || {} }, { key: 'plan', value: data.plan || {} }, { key: 'seeded', value: true }, { key: 'seenVersion', value: APP_VERSION }, { key: 'firstUse', value: Date.now() }, { key: 'lastBackup', value: Date.now() }],
   });
   await loadAll();
   applyTheme();
@@ -1047,6 +1248,7 @@ const ACT = {
     el.closest('.set-row').classList.toggle('done', st.done);
     el.setAttribute('aria-pressed', st.done ? 'true' : 'false');
     saveActive(); updateSessionCounters();
+    if (st.done) checkLivePr(s, it, st, el.closest('.set-row'));
   },
   addSet: d => {
     const c = ctx(d.mode); const it = findItem(c.sess, d.uid);
@@ -1130,7 +1332,16 @@ const ACT = {
     savePlan(p); rerender();
   },
   planCopy: () => copyLastWeek(),
-  planIcs: () => exportWeekIcs(),
+  saveRoutine: async d => {
+    const r = S.routines.find(x => x.id === d.rid);
+    clearTimeout(timers['rt' + r.id]);
+    if (!r.name.trim()) r.name = 'Untitled routine';
+    await putRoutine(r); toast('Routine saved'); go('train');
+  },
+  planIcs: () => {
+    if (!weekIsos(curMonday()).some(iso => (plan()[iso] || []).some(e => S.routines.some(r => r.id === e.routineId)))) return toast('Nothing planned this week');
+    openSheet('cal');
+  },
   // history calendar
   hview: d => { UI.hview = d.v; UI.hday = null; rerender(); },
   hnav: d => {
@@ -1158,7 +1369,29 @@ const ACT = {
     renderSheet(); document.getElementById('pklist').scrollTop = sc;
   },
   pickDone: () => { const p = UI.picker; UI.picker = null; renderSheet(); p.onPick([...p.sel]); },
-  closeSheet: () => { UI.picker = null; renderSheet(); },
+  closeSheet: () => closeSheet(),
+  whatsNew: () => openSheet('news'),
+  checkUpdate: () => checkUpdate(),
+  calOpen: () => calExport('open'),
+  calShare: () => calExport('share'),
+  calData: () => calExport('data'),
+  catReset: d => { const cc = { ...(cfg().catColors || {}) }; delete cc[d.v]; setMeta('settings', { ...(S.meta.settings || {}), catColors: cc }); rerender(); },
+  addCat: () => {
+    const inp = document.getElementById('newcat'); const name = inp.value.trim().replace(/\s+/g, ' ');
+    if (!name) return inp.focus();
+    if (name.toLowerCase() === 'all' || cats().some(c => c.toLowerCase() === name.toLowerCase())) return alert(`There’s already a category called “${name}”.`);
+    setMeta('settings', { ...(S.meta.settings || {}), customCats: [...(cfg().customCats || []), name] });
+    toast(`Added “${name}”`); rerender();
+  },
+  delCat: d => {
+    const n = [...S.ex.values()].filter(e => e.category === d.v).length;
+    if (n) return alert(`${n} exercise${n === 1 ? ' uses' : 's use'} “${d.v}”. Move ${n === 1 ? 'it' : 'them'} to another category first.`);
+    if (!confirm(`Remove the category “${d.v}”?`)) return;
+    const cc = { ...(cfg().catColors || {}) }; delete cc[d.v];
+    setMeta('settings', { ...(S.meta.settings || {}), customCats: (cfg().customCats || []).filter(c => c !== d.v), catColors: cc });
+    if (UI.excat === d.v) UI.excat = 'All';
+    rerender();
+  },
   reload: () => location.reload(),
 };
 
@@ -1219,6 +1452,10 @@ const CH = {
     setMeta('settings', { ...(S.meta.settings || {}), [d.key]: n }); toast('Saved');
   },
   sessTime: (d, v) => { if (!v) return; UI.draft[d.key] = new Date(v).getTime(); },
+  catColor: (d, v) => {
+    if (!/^#[0-9a-f]{6}$/i.test(v)) return;
+    setMeta('settings', { ...(S.meta.settings || {}), catColors: { ...(cfg().catColors || {}), [d.v]: v } }); rerender();
+  },
   importFile: (d, v, el) => { const f = el.files?.[0]; el.value = ''; if (f) importFile(f); },
 };
 
@@ -1258,12 +1495,20 @@ async function boot() {
   applyTheme();
   if (!location.hash) location.replace('#/' + (S.meta.active ? 'session' : 'train'));
   render();
+  // What's new: once per version for existing users; new installs skip it.
+  if (S.meta.seenVersion !== APP_VERSION) {
+    if (UI.freshInstall) setMeta('seenVersion', APP_VERSION); else openSheet('news');
+  }
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('./sw.js').then(reg => {
+      swReg = reg;
       reg.addEventListener('updatefound', () => {
         const nw = reg.installing;
         nw?.addEventListener('statechange', () => {
-          if (nw.state === 'installed' && navigator.serviceWorker.controller) toast('Update ready', { act: 'reload', label: 'Reload' });
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+            markUpdateReady();
+            toast('Update ready', { act: 'reload', label: 'Reload' });
+          }
         });
       });
     }).catch(() => { });
