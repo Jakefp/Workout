@@ -1,6 +1,6 @@
 import { db } from './db.js';
 import { SEED_EXERCISES, SEED_VERSION, MUSCLES, CATEGORIES } from './seed.js';
-import { renderChart } from './chart.js';
+import { renderChart, donutSvg, renderBars } from './chart.js';
 import {
   uid, esc, DAY, parseDur, fmtDur, fmtLength, localISO, startOfWeek, addDays, fmtDate, fmtTime, num,
   TYPES, MODALITIES, isCardio, fieldsFor, fmtField, summariseSet, setLabel,
@@ -10,7 +10,7 @@ import {
 
 const APP_NAME = 'Workout_jfp';
 const FILE_PREFIX = 'workout_jfp';
-const APP_VERSION = '1.3.3';
+const APP_VERSION = '1.4.0';
 const DEFAULT_CFG = { secPerRep: 3, minSetSec: 20, changeoverSec: 60 };
 const BACKUP_DAYS = 14;
 const THEMES = { auto: 'Auto', light: 'Light', dark: 'Dark' };
@@ -21,18 +21,19 @@ const S = { ex: new Map(), routines: [], sessions: [], weights: [], meta: {} };
 const UI = {
   exq: '', excat: 'All', exmus: '', exarch: false,
   wrange: '3M', metric: {}, draft: null, exDraft: null, picker: null, menu: null,
-  week: null, pday: null, planAdd: false, hview: 'month', hcur: Date.now(), hday: null,
+  week: null, pday: null, planAdd: false, hview: 'month', hcur: Date.now(), hday: null, hpie: 'cat', hbar: null, tour: null,
   upd: {}, sheet: null, freshInstall: false,
 };
 
 // Shown once after updating to this version (and from Settings → What's new).
 const WHATS_NEW = [
-  ['➕', '270+ new exercises', 'Including swimming, hiking, boxing and other cardio, plus a new red Rehab category for isometric holds.'],
-  ['📏', 'Your units', 'Choose kg or lb for lifting, kg, lb or stone for bodyweight, km or miles for distance, and whether weeks start on Monday or Sunday. Find them in Settings → Units.'],
-  ['🗓️', 'Add to Calendar fixed', 'Add week to Calendar opens your Calendar app again in one tap. Routines are added as all-day events; set times in your calendar if you want them.'],
-  ['🆕', 'New exercises while building', 'Create an exercise from the Add exercises list. Names that already exist are flagged.'],
-  ['💬', 'Clearer choices', 'Pop-ups now say what each button does. For example, finishing a changed routine lets you update it, save it as a new routine, or keep the change as a one-off.'],
-];
+  ['📝', 'Notes carry forward', 'A note you write on an exercise now appears in its Last box the next time you do that exercise.'],
+  ['🥧', 'Where your time went', 'History has a pie chart of your training time by category or muscle group, and a bar chart of minutes per day, week or month. Both follow the week, month or year you pick.'],
+  ['🧭', 'How to use the app', 'Tap ? at the top of any page for a quick tour of it, or run the full tour from Settings → How to use the app.'],
+  ['✏️', 'Fix a saved session', 'Open any session in History and tap Edit session to correct sets, exercises or notes. Forgot to tap Finish? Set the real length in minutes and the finish time follows.'],
+  ['↕️', 'Train tidied up', 'Start an empty session is now above your routines, and routines are listed with the most recently used first.'],
+  ['🛠️', 'Tab bar fix', 'The bottom tab bar no longer gets stuck partway up the screen while you scroll.'],
+]
 const cfg = () => ({ ...DEFAULT_CFG, ...(S.meta.settings || {}) });
 const setSettings = patch => setMeta('settings', { ...(S.meta.settings || {}), ...patch });
 // Copy unit / week-start settings into util's prefs, which formatting and parsing read.
@@ -130,6 +131,15 @@ function lastPerf(exId, excludeId) {
     if (s.id === excludeId) continue;
     const it = s.items.find(i => i.exId === exId && i.sets.some(x => x.done !== false));
     if (it) return { session: s, item: it, sets: it.sets.filter(x => x.done !== false) };
+  }
+  return null;
+}
+// Most recent non-empty note written on this exercise (shown in the Last box while logging).
+function lastNote(exId, excludeId) {
+  for (const s of sessionsDesc()) {
+    if (s.id === excludeId) continue;
+    const it = s.items.find(i => i.exId === exId && i.note?.trim());
+    if (it) return { session: s, note: it.note.trim() };
   }
   return null;
 }
@@ -416,21 +426,23 @@ const TAB = { train: 'train', routine: 'train', session: 'train', history: 'hist
 let mounts = [];
 const onMount = fn => mounts.push(fn);
 function render(keepScroll = false) {
-  const y = window.scrollY;
+  // <main> is the scroller (see css: the document itself never scrolls).
+  const y = main().scrollTop;
   const r = route();
   mounts = [];
   const view = VIEWS[r.name] || VIEWS.train;
   main().innerHTML = view(r);
   document.querySelectorAll('.tabbar a').forEach(a => a.classList.toggle('on', a.dataset.tab === (TAB[r.name] || 'train')));
   mounts.forEach(fn => fn());
-  if (keepScroll) window.scrollTo(0, y);
+  if (keepScroll) main().scrollTop = y;
+  tourAfterRender();
 }
 const rerender = () => render(true);
 window.addEventListener('hashchange', () => {
   UI.menu = null;
   // Leaving the exercise form drops its unsaved draft and any "add to routine" hand-off.
   if (route().name !== 'exercise-edit') { UI.exDraft = null; UI.newEx = null; }
-  render(); window.scrollTo(0, 0);
+  render(); main().scrollTop = 0;
 });
 
 // ---------------- Shared bits ----------------
@@ -455,10 +467,138 @@ function toast(msg, action) {
   if (!action) timers.toast = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
+// ---------------- How-to tour ----------------
+// Spotlights parts of a page with a short explanation and Skip / Back / Next. The ? in a page's
+// header tours that page; Settings → How to use the app runs every tab in TOUR_ORDER.
+// Steps whose element isn't on screen (e.g. no routines yet) are skipped.
+const helpBtn = page => `<button class="icon help" data-act="tour" data-v="${page}" aria-label="How this page works">?</button>`;
+const TOUR_ORDER = ['train', 'history', 'exercises', 'weight', 'settings'];
+const TOUR_NAMES = { train: 'Train', history: 'History', exercises: 'Exercises', weight: 'Weight', settings: 'Settings' };
+const TOUR = {
+  train: [
+    { full: true, t: `Welcome to ${APP_NAME}`, d: 'This tour shows the main features on each page. Tap Next to carry on, or Skip to stop at any time. You can replay it from Settings, or tap ? at the top of any page.' },
+    { sel: '.card.live', t: 'Session in progress', d: 'The session you’re logging. Tap it to go back. It saves as you go, even if you close the app.' },
+    { sel: '[data-tour=week]', t: 'Plan your week', d: 'Tap a day, then “+ Plan a routine”. The dots under each day turn green once done and grey if missed. Use ‹ › to change week.' },
+    { sel: '[data-tour=planActions]', t: 'Copy or add to Calendar', d: '“Copy last week” repeats last week’s plan. “Add week to Calendar” puts the planned routines in your Calendar app as all-day events.' },
+    { sel: '[data-tour=empty]', t: 'Start an empty session', d: 'Log a one-off workout without a routine and add exercises as you go. When you finish, you can save it as a new routine.' },
+    { sel: '[data-tour=routines]', t: 'Your routines', d: 'Most recently used at the top. Tap a routine to change its exercises, targets and supersets, or tap Start to begin logging it.' },
+    { sel: '.tabbar', full: true, t: 'Moving around', d: 'These tabs open History, Exercises, Bodyweight and Settings. Next, a look at History.' },
+  ],
+  session: [
+    { sel: '.est', t: 'Session at a glance', d: 'Start time, time elapsed, an estimate of the total length, and how many sets you’ve ticked.' },
+    { sel: '[data-tour=last]', t: 'Last time', d: 'What you did last time, plus the most recent note you wrote on this exercise. The sets below start with last time’s numbers.' },
+    { sel: '.tick', t: 'Tick each set', d: 'Change the numbers if needed, then tick ✓. Changing a value also updates the sets below it that you haven’t touched. A new personal record flashes gold.' },
+    { sel: '#main [data-act=menu]', t: 'Exercise options', d: 'Move an exercise, swap it, remove it, or pair it with the next one as a superset.' },
+    { sel: '.note', t: 'Exercise notes', d: 'Notes here show up in the Last box the next time you do this exercise, e.g. “Elbows in” or “Try 62.5 next time”.' },
+    { sel: '[data-tour=effort]', t: 'How hard was it?', d: 'Optional. Effort shades the History calendar, so harder days show darker.' },
+    { sel: '.top [data-act=finish]', t: 'Finish', d: 'Saves ticked sets to History. Unticked sets are left out. If you changed a routine, you choose whether to update it.' },
+  ],
+  routine: [
+    { sel: '.title-in', t: 'Name', d: 'Tap to rename the routine. Changes save as you go.' },
+    { sel: '.targets', t: 'Targets', d: 'Sets, reps or time, and rest for each exercise. They pre-fill the session and drive the length estimate.' },
+    { sel: '#main [data-act=menu]', t: 'Reorder and supersets', d: 'Use ⋯ to move an exercise, swap it, or superset it with the next one, so you alternate their sets.' },
+    { sel: '[data-tour=rtAdd]', t: 'Add exercises', d: 'Choose from the library, or create a new exercise that’s added here straight away.' },
+  ],
+  history: [
+    { sel: '[data-tour=hview]', t: 'Week, month or year', d: 'Choose a period and use ‹ › to move through time. Everything on this page follows it.' },
+    { sel: '[data-tour=cal]', t: 'Training calendar', d: 'Darker days were harder (minutes × effort). The dots show which categories you trained. Tap a day to list its sessions.' },
+    { sel: '[data-tour=pie]', t: 'Where your time went', d: 'Time per category for the period. Switch to Muscles to see body areas, with individual muscles listed underneath.' },
+    { sel: '[data-tour=bars]', t: 'Training time', d: 'Minutes per day, week or month, coloured by category. Tap a bar for its breakdown.' },
+    { sel: '[data-tour=hlist]', t: 'Your sessions', d: 'Tap a session to see every set and any personal records, and to edit or delete it.' },
+  ],
+  exercises: [
+    { sel: '[data-tour=exFilter]', t: 'Find exercises', d: 'Search by name, or filter by category and muscle group.' },
+    { sel: '[data-tour=exNew]', t: 'Add your own', d: 'Create an exercise and choose how it’s logged: weight, bodyweight, hold, stretch or cardio.' },
+    { sel: '[data-tour=exList]', t: 'Progress charts', d: 'Tap an exercise for its progress chart, personal record and past sessions. The number shows how many sessions it’s in.' },
+  ],
+  weight: [
+    { sel: '[data-tour=wLog]', t: 'Log your weight', d: 'Enter today’s weight (or pick another date) and tap Log. One entry per day.' },
+    { sel: '.stats', t: 'Trend', d: 'The 7-day average smooths out day-to-day changes, and it’s compared with a week ago.' },
+    { sel: '[data-tour=wChart]', t: 'Chart', d: 'Daily weigh-ins as dots and the 7-day average as a line. Change the range above it.' },
+  ],
+  settings: [
+    { sel: '[data-tour=sLook]', t: 'Appearance', d: 'Light, dark, or Auto to match your phone.' },
+    { sel: '[data-tour=sUnits]', t: 'Units', d: 'kg or lb, km or miles, and whether weeks start on Monday or Sunday. Everything you’ve logged converts automatically.' },
+    { sel: '[data-tour=sCats]', t: 'Categories', d: 'Change the colours used throughout the app, or add your own categories.' },
+    { sel: '[data-tour=sBackup]', t: 'Back up regularly', d: 'Your data only lives on this phone. Back up to Files or iCloud Drive, and restore from a backup on a new phone.' },
+    { sel: '[data-tour=sHelp]', t: 'Help and updates', d: 'Check for updates, see what’s new, or replay this tour.' },
+  ],
+};
+const tourSteps = () => (TOUR[UI.tour.page] || []).filter(st => (!st.full || UI.tour.full) && (!st.sel || document.querySelector(st.sel)));
+function startTour(page, full) {
+  if (UI.sheet || UI.picker) closeSheet();
+  UI.tour = { page, i: 0, full };
+  if (route().name === page) showTour(); else go(page);   // render() then calls tourAfterRender
+}
+function tourAfterRender() {
+  if (!UI.tour) return;
+  if (route().name !== UI.tour.page) return endTour();
+  requestAnimationFrame(showTour);
+}
+function endTour(done) {
+  const wasFull = UI.tour?.full;
+  UI.tour = null;
+  const box = document.getElementById('tour');
+  box.classList.remove('open'); box.innerHTML = '';
+  if (done && wasFull) toast('Tap ? on any page to see its tips again');
+}
+function showTour() {
+  const T = UI.tour; if (!T) return;
+  const steps = tourSteps();
+  if (!steps.length) return tourNext();
+  T.i = Math.min(T.i, steps.length - 1);
+  const st = steps[T.i];
+  const target = st.sel ? document.querySelector(st.sel) : null;
+  if (target && !target.closest('.tabbar')) {
+    const tall = target.getBoundingClientRect().height > window.innerHeight * 0.45;
+    target.scrollIntoView({ block: tall ? 'start' : 'center' });
+  }
+  const last = T.i === steps.length - 1;
+  const nextPage = T.full && last ? TOUR_ORDER[TOUR_ORDER.indexOf(T.page) + 1] : null;
+  const box = document.getElementById('tour');
+  box.innerHTML = `<div class="tour-block"></div><div class="tour-spot"></div>
+    <div class="tour-card" role="dialog" aria-modal="true" aria-labelledby="tour-t">
+      <h3 id="tour-t">${esc(st.t)}</h3><p>${esc(st.d)}</p>
+      <div class="tour-foot"><span class="muted">${T.full ? esc(TOUR_NAMES[T.page] || '') + ' · ' : ''}${T.i + 1} of ${steps.length}</span>
+        ${last && !nextPage ? '' : '<button class="link muted" data-act="tourEnd">Skip</button>'}
+        ${T.i ? '<button class="btn sm ghost" data-act="tourBack">Back</button>' : ''}
+        <button class="btn sm" data-act="tourNext">${last ? (nextPage ? `Next: ${esc(TOUR_NAMES[nextPage])}` : 'Done') : 'Next'}</button></div>
+    </div>`;
+  box.classList.add('open');
+  placeTour(target);
+  box.querySelector('[data-act=tourNext]').focus({ preventScroll: true });
+}
+// Spotlight the target, and put the card below it, else above it, else at the bottom of the screen.
+function placeTour(target) {
+  const box = document.getElementById('tour');
+  const spot = box.querySelector('.tour-spot'), card = box.querySelector('.tour-card');
+  if (!spot || !card) return;
+  const vh = window.innerHeight, ch = card.offsetHeight;
+  if (!target) { spot.className = 'tour-spot none'; card.style.top = Math.max(16, (vh - ch) / 2) + 'px'; return; }
+  const r = target.getBoundingClientRect(), pad = 6;
+  const top = Math.max(r.top - pad, 4), bottom = Math.min(r.bottom + pad, vh - 4);
+  Object.assign(spot.style, { left: `${r.left - pad}px`, top: `${top}px`, width: `${r.width + 2 * pad}px`, height: `${Math.max(0, bottom - top)}px` });
+  let y = bottom + 12;
+  if (y + ch > vh - 12) y = top - 12 - ch;
+  if (y < 12) y = vh - ch - 16;
+  card.style.top = `${y}px`;
+}
+function tourNext() {
+  const T = UI.tour; if (!T) return;
+  if (T.i < tourSteps().length - 1) { T.i++; return showTour(); }
+  const np = T.full && TOUR_ORDER[TOUR_ORDER.indexOf(T.page) + 1];
+  if (np) { UI.tour = { page: np, i: 0, full: true }; return go(np); }
+  endTour(true);
+}
+window.addEventListener('resize', () => { if (UI.tour) showTour(); });
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && UI.tour) endTour(); });
+
 // ---------------- Train ----------------
 function trainView() {
   const a = S.meta.active;
-  const routines = S.routines.map(r => {
+  // Most recent first: the later of last done and created, so a new routine starts at the top.
+  const recency = r => Math.max(routineLastDone(r.id)?.start || 0, r.created || 0);
+  const routines = [...S.routines].sort((x, y) => recency(y) - recency(x)).map(r => {
     const last = routineLastDone(r.id);
     const n = r.items.length;
     return `
@@ -471,18 +611,18 @@ function trainView() {
       </div>`;
   }).join('');
   return `
-    ${header('Train')}
+    ${header('Train', { right: helpBtn('train') })}
     ${backupBanner()}
     ${a ? `<a class="card live" href="#/session">
         <div><div class="eyebrow">In progress</div><div class="routine-name">${esc(a.name)}</div>
         <div class="muted">Started ${fmtTime(a.start)} · <span data-elapsed="${a.start}">${fmtLength(Date.now() - a.start > 0 ? (Date.now() - a.start) / 1000 : 0)}</span></div></div>
         <span class="btn">Resume</span></a>` : ''}
     ${weekHtml()}
-    <section>
+    <button class="btn ghost wide" data-act="start" data-id="" data-tour="empty">Start an empty session</button>
+    <section data-tour="routines">
       <div class="sec-h"><h2>Routines</h2><button class="link" data-act="newRoutine">+ New routine</button></div>
       ${routines || `<div class="empty">No routines yet. Create one, e.g. “Pull day” or “Evening stretch”, and pick its exercises.</div>`}
-    </section>
-    <button class="btn ghost wide" data-act="start" data-id="">Start an empty session</button>`;
+    </section>`;
 }
 
 const curMonday = () => startOfWeek(UI.week ? new Date(UI.week) : new Date());
@@ -527,7 +667,7 @@ function weekHtml() {
     ? `<div class="chips">${S.routines.map(r => `<button class="chip" data-act="planAdd" data-v="${sel}" data-id="${r.id}">${esc(r.name)}</button>`).join('')
       || '<span class="muted">Create a routine first.</span>'}<button class="chip" data-act="planAddToggle">Cancel</button></div>`
     : `<button class="link" data-act="planAddToggle">+ Plan a routine</button>`;
-  return `<section>
+  return `<section data-tour="week">
     <div class="sec-h"><h2>${label}</h2><div class="wnav">
       <button class="icon" data-act="wk" data-v="-1" aria-label="Previous week">‹</button>
       ${thisWeek ? '' : '<button class="link" data-act="wk" data-v="0">Today</button>'}
@@ -538,7 +678,7 @@ function weekHtml() {
       ${rows || '<div class="muted plan-empty">Nothing planned.</div>'}
       ${add}
     </div>
-    <div class="plan-actions">
+    <div class="plan-actions" data-tour="planActions">
       <button class="link" data-act="planCopy">Copy last week</button>
       ${icsLink()}
     </div>
@@ -637,11 +777,11 @@ function routineView(id) {
       ${inner}</div>`;
   }).join('');
   return `
-    ${header('Routine', { back: '#/train', right: `<button class="btn sm" data-act="start" data-id="${r.id}" ${r.items.length ? '' : 'disabled'}>Start</button>` })}
+    ${header('Routine', { back: '#/train', right: `${helpBtn('routine')}<button class="btn sm" data-act="start" data-id="${r.id}" ${r.items.length ? '' : 'disabled'}>Start</button>` })}
     <input class="title-in" data-in="rtName" data-rid="${r.id}" value="${esc(r.name)}" placeholder="Routine name" aria-label="Routine name">
     <div class="est"><span class="muted">Estimated length</span> <b id="est">~${fmtLength(routineEst(r))}</b></div>
     ${body || `<div class="empty">Add the exercises for this routine. Targets and rest are set per exercise.</div>`}
-    <div class="two add-two">
+    <div class="two add-two" data-tour="rtAdd">
       <button class="btn ghost" data-act="pickForRoutine" data-rid="${r.id}">+ Add exercises</button>
       <button class="btn ghost" data-act="newExForRoutine" data-rid="${r.id}">+ New exercise</button>
     </div>
@@ -699,7 +839,7 @@ function liveSessionView() {
   const doneSets = s.items.reduce((n, it) => n + it.sets.filter(x => x.done).length, 0);
   onMount(() => tickElapsed());
   return `
-    ${header('Session', { back: '#/train', right: `<button class="btn sm" data-act="finish">Finish</button>` })}
+    ${header('Session', { back: '#/train', right: `${helpBtn('session')}<button class="btn sm" data-act="finish">Finish</button>` })}
     <input class="title-in" data-in="sessName" data-mode="live" value="${esc(s.name)}" aria-label="Session name">
     <div class="est">
       <span><span class="muted">Started</span> ${fmtTime(s.start)}</span>
@@ -709,7 +849,7 @@ function liveSessionView() {
     </div>
     ${sessionItemsHtml(s, 'live')}
     <button class="btn ghost wide" data-act="pickForSession" data-mode="live">+ Add exercise</button>
-    ${effortHtml(s, 'live')}
+    <div data-tour="effort">${effortHtml(s, 'live')}</div>
     <label class="field"><span>Session note</span><textarea class="in" rows="2" data-in="sessNote" data-mode="live" placeholder="How did it go?">${esc(s.note)}</textarea></label>
     <button class="btn wide" data-act="finish">Finish session</button>
     <div class="danger-zone"><button class="link danger" data-act="discard">Discard session</button></div>`;
@@ -738,6 +878,9 @@ function sessionItemHtml(s, it, lab, mode, inGroup) {
   const ex = S.ex.get(it.exId) || { id: it.exId, name: 'Deleted exercise', type: 'weight' };
   const fields = fieldsFor(ex);
   const last = mode === 'live' ? lastPerf(ex.id, s.id) : null;
+  const ln = mode === 'live' ? lastNote(ex.id, s.id) : null;
+  const sameSess = ln && last && ln.session.id === last.session.id;
+  const noteHtml = ln ? `<div class="last-note"><span class="muted">📝 ${sameSess ? 'Note' : 'Note · ' + fmtDate(ln.session.start, { day: 'numeric', month: 'short' })}</span> ${esc(ln.note)}</div>` : '';
   const open = UI.menu === it.uid;
   const live = mode === 'live';
   const t = it.target || {};
@@ -768,7 +911,7 @@ function sessionItemHtml(s, it, lab, mode, inGroup) {
         ${targetTxt ? `<span><span class="muted">Target</span> ${esc(targetTxt)}</span>` : ''}
         ${!inGroup && ex.type !== 'steady' ? `<label class="inline"><span class="muted">Rest</span> <input class="in sm" inputmode="decimal" data-in="itemRest" data-mode="${mode}" data-uid="${it.uid}" data-kind="dur" value="${fmtDur(it.rest)}"></label>` : ''}
       </div>
-      <div class="last">${last ? `<span class="muted">Last · ${fmtDate(last.session.start, { day: 'numeric', month: 'short' })}</span> ${last.sets.map(x => esc(summariseSet(ex, x))).join('<span class="sep"> · </span>')}` : `<span class="muted">No previous ${esc(ex.name)} logged</span>`}</div>` : ''}
+      <div class="last" data-tour="last">${last ? `<span class="muted">Last · ${fmtDate(last.session.start, { day: 'numeric', month: 'short' })}</span> ${last.sets.map(x => esc(summariseSet(ex, x))).join('<span class="sep"> · </span>')}` : `<span class="muted">No previous ${esc(ex.name)} logged</span>`}${noteHtml}</div>` : ''}
       <div class="sets" style="--cols:${fields.length}">
         <div class="set-row head"><span>${setLabel(ex) === 'Round' ? 'Rnd' : 'Set'}</span>${fields.map(f => `<span>${esc(f.label)}</span>`).join('')}<span></span></div>
         ${rows}
@@ -777,7 +920,7 @@ function sessionItemHtml(s, it, lab, mode, inGroup) {
         <button class="link" data-act="addSet" data-mode="${mode}" data-uid="${it.uid}">+ Add ${setLabel(ex).toLowerCase()}</button>
         ${live && it.sets.length ? `<button class="link muted" data-act="popSet" data-uid="${it.uid}">− Remove last</button>` : ''}
       </div>
-      <textarea class="in note" rows="1" data-in="itemNote" data-mode="${mode}" data-uid="${it.uid}" placeholder="Note">${esc(it.note)}</textarea>
+      <textarea class="in note" rows="1" data-in="itemNote" data-mode="${mode}" data-uid="${it.uid}" placeholder="${live ? 'Note (shows next time you do this)' : 'Note'}">${esc(it.note)}</textarea>
     </div>`;
 }
 
@@ -847,6 +990,116 @@ function historyCalendar(byDay, a, b) {
   }).join('')}</div>`;
 }
 
+// ---------------- History: time breakdown ----------------
+// Seconds one logged exercise took, estimated from its actual sets (reps or times) and its rest.
+function itemSec(it) {
+  const ex = S.ex.get(it.exId); if (!ex) return 0;
+  const c = cfg(); const sides = ex.perSide ? 2 : 1;
+  const tReps = num(it.target?.reps), tTime = num(it.target?.time);
+  let work = 0;
+  for (const s of it.sets) {
+    if (ex.type === 'weight' || ex.type === 'bodyweight') work += Math.max((num(s.reps) ?? tReps ?? 0) * c.secPerRep * sides, c.minSetSec);
+    else if (ex.type === 'hold' || ex.type === 'stretch') work += (num(s.time) ?? tTime ?? 0) * sides;
+    else work += num(s.time) ?? tTime ?? 0;
+  }
+  return work + (ex.type === 'steady' ? 0 : Math.max(0, it.sets.length - 1) * (num(it.rest) || 0));
+}
+// A session's time shared across its exercises: the actual length (when it has one) split in
+// proportion to each exercise's estimate. [{ ex, sec }]
+function sessionParts(s) {
+  const parts = s.items.map(it => ({ ex: S.ex.get(it.exId), sec: itemSec(it) })).filter(p => p.ex);
+  const est = parts.reduce((t, p) => t + p.sec, 0);
+  const actual = s.end ? (s.end - s.start) / 1000 : 0;
+  if (actual > 0 && est > 0) parts.forEach(p => { p.sec *= actual / est; });
+  else if (actual > 0) parts.forEach(p => { p.sec = actual / parts.length; });
+  return parts;
+}
+// 8 fixed muscle groups (one colour each); the individual muscles are listed under each group.
+const MUSCLE_GROUPS = [['Chest', ['Chest']], ['Back', ['Back']], ['Shoulders', ['Shoulders']], ['Arms', ['Biceps', 'Triceps', 'Forearms']],
+  ['Legs', ['Quads', 'Hamstrings', 'Glutes', 'Calves', 'Hips']], ['Core', ['Core']], ['Full body', ['Full body']], ['Cardio', ['Cardio']]];
+const muscleGroup = m => MUSCLE_GROUPS.find(([, ms]) => ms.includes(m))?.[0] || 'Other';
+const groupColor = g => { const i = MUSCLE_GROUPS.findIndex(([n]) => n === g); return i < 0 ? 'var(--ink-3)' : `var(--s${i + 1})`; };
+const pieColor = (by, k) => by === 'mus' ? groupColor(k) : k === 'Other' ? 'var(--ink-3)' : catColor(k);
+// Seconds per category, or per muscle group (an exercise's time is shared equally across its muscles).
+function breakdown(sessions, by) {
+  const out = {};
+  const add = (k, sec, sub) => {
+    const o = out[k] || (out[k] = { sec: 0, sub: {} });
+    o.sec += sec; if (sub) o.sub[sub] = (o.sub[sub] || 0) + sec;
+  };
+  for (const s of sessions) for (const { ex, sec } of sessionParts(s)) {
+    if (!sec) continue;
+    if (by === 'cat') { add(ex.category || 'Other', sec); continue; }
+    const ms = ex.muscles?.length ? ex.muscles : null;
+    if (!ms) { add('Other', sec); continue; }
+    for (const m of ms) { const g = muscleGroup(m); add(g, sec / ms.length, MUSCLE_GROUPS.find(([n]) => n === g)?.[1].length > 1 ? m : null); }
+  }
+  return out;
+}
+const fmtMin = sec => fmtLength(sec);
+// Period buckets for the bar chart: days (week view), weeks (month view) or months (year view).
+function histBuckets(a, b) {
+  const out = [];
+  if (UI.hview === 'week') for (let i = 0; i < 7; i++) { const d = addDays(a, i); out.push({ a: d, b: addDays(d, 1), label: fmtDate(d, { weekday: 'short' }), long: fmtDate(d, { weekday: 'long', day: 'numeric', month: 'short' }) }); }
+  else if (UI.hview === 'year') for (let m = 0; m < 12; m++) { const d = new Date(a.getFullYear(), m, 1); out.push({ a: d, b: new Date(a.getFullYear(), m + 1, 1), label: fmtDate(d, { month: 'narrow' }), long: fmtDate(d, { month: 'long', year: 'numeric' }) }); }
+  else for (let d = startOfWeek(a); d < b; d = addDays(d, 7)) {
+    const s = d < a ? a : d, e = addDays(d, 7) > b ? b : addDays(d, 7);
+    out.push({ a: s, b: e, label: fmtDate(s, { day: 'numeric', month: 'short' }), long: `${fmtDate(s, { day: 'numeric', month: 'short' })} – ${fmtDate(addDays(e, -1), { day: 'numeric', month: 'short' })}` });
+  }
+  return out;
+}
+function breakdownHtml(inRange, a, b) {
+  if (!inRange.length) return '';
+  const by = UI.hpie;
+  const data = breakdown(inRange, by);
+  const total = Object.values(data).reduce((t, o) => t + o.sec, 0);
+  if (!total) return '';
+  const keys = Object.keys(data).sort((x, y) => (x === 'Other') - (y === 'Other') || data[y].sec - data[x].sec);
+  const slices = keys.map(k => ({ v: data[k].sec, color: pieColor(by, k) }));
+  const legend = keys.map(k => {
+    const o = data[k]; const pct = Math.round(o.sec / total * 100);
+    const sub = Object.entries(o.sub).sort((x, y) => y[1] - x[1]).map(([m, v]) => `${m} ${fmtMin(v)}`).join(' · ');
+    return `<div class="slice"><i class="cd" style="background:${pieColor(by, k)}"></i><span><b>${esc(k)}</b> <span class="muted">${pct}%</span></span><span>${fmtMin(o.sec)}</span>${sub ? `<small>${esc(sub)}</small>` : ''}</div>`;
+  }).join('');
+  // Bars: training minutes per day / week / month, stacked by category.
+  const buckets = histBuckets(a, b).map(bk => {
+    const parts = {};
+    for (const s of inRange) if (s.start >= bk.a.getTime() && s.start < bk.b.getTime())
+      for (const { ex, sec } of sessionParts(s)) { const k = cats().includes(ex.category) ? ex.category : 'Other'; parts[k] = (parts[k] || 0) + sec / 60; }
+    return { ...bk, parts };
+  });
+  const order = [...cats(), 'Other'];
+  const maxMin = Math.max(...buckets.map(bk => Object.values(bk.parts).reduce((t, v) => t + v, 0)));
+  const hours = maxMin >= 180;
+  const sel = UI.hbar !== null && UI.hbar < buckets.length ? UI.hbar : null;
+  onMount(() => {
+    const el = document.getElementById('hbars'); if (!el) return;
+    renderBars(el, {
+      buckets: buckets.map(bk => ({ label: bk.label, parts: hours ? Object.fromEntries(Object.entries(bk.parts).map(([k, v]) => [k, v / 60])) : bk.parts })),
+      keys: order, color: k => pieColor('cat', k), sel, yFmt: v => hours ? `${v}h` : `${v}`,
+    });
+  });
+  const tip = sel === null ? `<span class="muted">Tap a bar to see its breakdown.</span>` : (() => {
+    const bk = buckets[sel]; const tot = Object.values(bk.parts).reduce((t, v) => t + v, 0);
+    const parts = order.filter(k => bk.parts[k] > 0.5).map(k => `${catDot(k === 'Other' ? '' : k)}${esc(k)} ${fmtMin(bk.parts[k] * 60)}`).join(' · ');
+    return `<b>${esc(bk.long)}</b> · ${tot ? fmtMin(tot * 60) : 'rest'}${parts ? `<br>${parts}` : ''}`;
+  })();
+  const usedCats = order.filter(k => buckets.some(bk => bk.parts[k] > 0));
+  return `
+    <section class="card" data-tour="pie">
+      <div class="sec-h"><h2>Where your time went</h2>
+        <div class="seg">${[['cat', 'Category'], ['mus', 'Muscles']].map(([k, l]) => `<button class="${by === k ? 'on' : ''}" data-act="hpie" data-v="${k}" aria-pressed="${by === k}">${l}</button>`).join('')}</div></div>
+      <div class="donut-wrap">${donutSvg(slices, [fmtMin(total), 'total'])}<div class="slices">${legend}</div></div>
+      <p class="chart-note">Each session’s length is shared across its exercises by their sets, reps and times.${by === 'mus' ? ' An exercise’s time is split across the muscles it works.' : ''}</p>
+    </section>
+    <section class="card" data-tour="bars">
+      <div class="sec-h"><h2>Training time</h2><span class="muted">${hours ? 'hours' : 'minutes'} per ${UI.hview === 'week' ? 'day' : UI.hview === 'month' ? 'week' : 'month'}</span></div>
+      <div id="hbars" class="bars"></div>
+      ${usedCats.length > 1 ? `<div class="legend cat-legend">${usedCats.map(c => `<span>${catDot(c === 'Other' ? '' : c)}${esc(c)}</span>`).join('')}</div>` : ''}
+      <div class="bar-tip">${tip}</div>
+    </section>`;
+}
+
 function historyView() {
   const byDay = sessionsByDay();
   const { a, b, label } = histRange();
@@ -868,16 +1121,17 @@ function historyView() {
       <span class="chev">›</span></a>`;
   }).join('');
   const n = inRange.length;
-  return `${header('History')}${backupBanner()}
-    <div class="chips">${['week', 'month', 'year'].map(v => `<button class="chip ${UI.hview === v ? 'on' : ''}" data-act="hview" data-v="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>
+  return `${header('History', { right: helpBtn('history') })}${backupBanner()}
+    <div data-tour="hview"><div class="chips">${['week', 'month', 'year'].map(v => `<button class="chip ${UI.hview === v ? 'on' : ''}" data-act="hview" data-v="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>
     <div class="sec-h"><h2>${esc(label)}</h2><div class="wnav">
       <button class="icon" data-act="hnav" data-v="-1" aria-label="Previous">‹</button>
       <button class="link" data-act="hnav" data-v="0">Today</button>
-      <button class="icon" data-act="hnav" data-v="1" aria-label="Next">›</button></div></div>
-    <div class="card">${historyCalendar(byDay, a, b)}
+      <button class="icon" data-act="hnav" data-v="1" aria-label="Next">›</button></div></div></div>
+    <div class="card" data-tour="cal">${historyCalendar(byDay, a, b)}
       <div class="legend cat-legend">${cats().map(c => `<span>${catDot(c)}${esc(c)}</span>`).join('')}</div>
       <div class="heat-legend"><span>Easier</span><i></i><span>Harder</span></div></div>
-    <div class="sec-h"><h2>${UI.hday ? esc(longDay(UI.hday)) : `${n} session${n === 1 ? '' : 's'}`}</h2>
+    ${breakdownHtml(inRange, a, b)}
+    <div class="sec-h" data-tour="hlist"><h2>${UI.hday ? esc(longDay(UI.hday)) : `${n} session${n === 1 ? '' : 's'}`}</h2>
       ${UI.hday ? `<button class="link" data-act="hday" data-v="${UI.hday}">Show all</button>` : total ? `<span class="muted">${fmtLength(total)} total</span>` : ''}</div>
     ${rows || `<div class="empty">${S.sessions.length ? 'No sessions in this period.' : 'Finished sessions appear here.'}</div>`}`;
 }
@@ -913,12 +1167,18 @@ function sessionDetailView(id) {
       <div><span>Estimated</span><b>${s.estSec ? fmtLength(s.estSec) : '–'}</b></div>
       <div><span>Sets</span><b>${s.items.reduce((n, it) => n + it.sets.length, 0)}</b></div>
     </div>
+    ${dur > LONG_SESSION_SEC ? `<div class="banner"><div><b>Forgot to tap Finish?</b> This session ran ${fmtLength(dur)}. You can set the real length.</div>
+      <button class="btn sm" data-act="editSession" data-id="${s.id}">Fix length</button></div>` : ''}
     ${s.note ? `<div class="card note-ro">${esc(s.note)}</div>` : ''}
     ${body}
+    <button class="btn ghost wide" data-act="editSession" data-id="${s.id}">Edit session</button>
+    <p class="muted center">Fix sets, exercises, effort, notes, or the start time and length.</p>
     <div class="danger-zone"><button class="link danger" data-act="deleteSession" data-id="${s.id}">Delete session</button></div>`;
 }
 
 const dtLocal = ms => { const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60000); return d.toISOString().slice(0, 16); };
+// Saved sessions longer than this get a "Forgot to tap Finish?" prompt.
+const LONG_SESSION_SEC = 3 * 3600;
 
 function editSessionView(id) {
   if (!UI.draft || UI.draft.id !== id) {
@@ -930,9 +1190,13 @@ function editSessionView(id) {
   return `
     ${header('Edit session', { back: '#/history/' + id, right: `<button class="btn sm" data-act="saveEdit">Save</button>` })}
     <input class="title-in" data-in="sessName" data-mode="edit" value="${esc(d.name)}" aria-label="Session name">
-    <div class="two">
+    <div class="card">
       <label class="field"><span>Start</span><input class="in" type="datetime-local" data-ch="sessTime" data-key="start" value="${dtLocal(d.start)}"></label>
-      <label class="field"><span>Finish</span><input class="in" type="datetime-local" data-ch="sessTime" data-key="end" value="${d.end ? dtLocal(d.end) : ''}"></label>
+      <div class="two">
+        <label class="field"><span>Length (min)</span><input class="in" inputmode="numeric" data-ch="sessLen" value="${d.end ? Math.round((d.end - d.start) / 60000) : ''}" placeholder="e.g. 50"></label>
+        <label class="field"><span>Finish</span><input class="in" type="time" data-ch="sessEnd" value="${d.end ? fmtTime(d.end) : ''}"></label>
+      </div>
+      <small class="muted">Changing the length moves the finish time, and the other way round.${d.end && localISO(new Date(d.end)) !== localISO(new Date(d.start)) ? ` Finishes ${esc(fmtDate(d.end, { weekday: 'short', day: 'numeric', month: 'short' }))}.` : ''}</small>
     </div>
     ${sessionItemsHtml(d, 'edit')}
     <button class="btn ghost wide" data-act="pickForSession" data-mode="edit">+ Add exercise</button>
@@ -972,10 +1236,10 @@ function filterBar(prefix) {
 }
 function exercisesView() {
   return `
-    ${header('Exercises', { right: `<a class="btn sm" href="#/exercise-edit/new">+ New</a>` })}
-    ${filterBar('ex')}
+    ${header('Exercises', { right: `${helpBtn('exercises')}<a class="btn sm" href="#/exercise-edit/new" data-tour="exNew">+ New</a>` })}
+    <div data-tour="exFilter">${filterBar('ex')}</div>
     <label class="toggle"><input type="checkbox" data-ch="exarch" ${UI.exarch ? 'checked' : ''}> Show archived only</label>
-    <div id="exlist">${exerciseRows(filteredExercises())}</div>`;
+    <div id="exlist" data-tour="exList">${exerciseRows(filteredExercises())}</div>`;
 }
 
 function exerciseDetailView(id) {
@@ -1088,8 +1352,8 @@ function weightView() {
   const ph = latest ? (prefs.body === 'st' ? null : toBody(latest.kg).toFixed(1)) : (prefs.body === 'lb' ? '165.0' : '75.0');
   const stPh = latest ? fmtBody(latest.kg).match(/^(\d+) st ([\d.]+)/) : null;
   return `
-    ${header('Bodyweight')}
-    <div class="card weigh${prefs.body === 'st' ? ' st' : ''}">
+    ${header('Bodyweight', { right: helpBtn('weight') })}
+    <div data-tour="wLog" class="card weigh${prefs.body === 'st' ? ' st' : ''}">
       ${prefs.body === 'st'
       ? `<label class="tf"><span>st</span><input class="in big-in" id="wst" inputmode="decimal" placeholder="${stPh ? stPh[1] : '12'}"></label>
          <label class="tf"><span>lb</span><input class="in big-in" id="wlb" inputmode="decimal" placeholder="${stPh ? stPh[2] : '0'}"></label>`
@@ -1102,7 +1366,7 @@ function weightView() {
       <div><span>7-day avg</span><b>${fmtBody(avgNow)}</b></div>
       <div><span>vs last week</span><b>${change === null ? '–' : fmtBodyDelta(change)}</b></div>
     </div>` : ''}
-    <section class="card">
+    <section class="card" data-tour="wChart">
       <div class="chips">${Object.keys(RANGES).map(r => `<button class="chip ${UI.wrange === r ? 'on' : ''}" data-act="wrange" data-v="${r}">${r}</button>`).join('')}</div>
       <div id="wchart" class="chart"></div>
     </section>
@@ -1122,13 +1386,13 @@ function settingsView() {
     if (el && navigator.storage?.persisted) el.textContent = (await navigator.storage.persisted()) ? 'Protected from automatic clearing' : 'Not yet protected (add to Home Screen and log a session)';
   });
   return `
-    ${header('Settings')}
-    <section class="card">
+    ${header('Settings', { right: helpBtn('settings') })}
+    <section class="card" data-tour="sLook">
       <h2>Appearance</h2>
       <div class="chips">${Object.entries(THEMES).map(([k, v]) => `<button class="chip ${(c.theme || 'auto') === k ? 'on' : ''}" data-act="theme" data-v="${k}">${v}</button>`).join('')}</div>
       <p class="muted">Auto follows your phone’s light/dark setting.</p>
     </section>
-    <section class="card">
+    <section class="card" data-tour="sUnits">
       <h2>Units</h2>
       ${unitRow('Lifting weights', 'load', { kg: 'kg', lb: 'lb' }, prefs.load)}
       ${unitRow('Bodyweight', 'body', { kg: 'kg', lb: 'lb', st: 'st & lb' }, prefs.body)}
@@ -1136,7 +1400,7 @@ function settingsView() {
       ${unitRow('Week starts on', 'week', { mon: 'Monday', sun: 'Sunday' }, prefs.weekStart ? 'mon' : 'sun')}
       <p class="muted">Only changes how numbers are shown and typed. Everything already logged converts automatically, and exports stay in kg and km.</p>
     </section>
-    <section class="card">
+    <section class="card" data-tour="sCats">
       <h2>Categories</h2>
       <p class="muted">Tap a colour to change it. These colour the dots on exercises, routines and History.</p>
       ${cats().map(cat => {
@@ -1150,7 +1414,7 @@ function settingsView() {
       }).join('')}
       <div class="cat-add"><input class="in" id="newcat" maxlength="24" placeholder="New category, e.g. CrossFit"><button class="btn sm" data-act="addCat">Add</button></div>
     </section>
-    <section class="card">
+    <section class="card" data-tour="sBackup">
       <h2>Backup</h2>
       <p class="muted">Your data only lives on this phone. Back up to Files / iCloud Drive regularly. Last backup: <b>${S.meta.lastBackup ? fmtDate(S.meta.lastBackup, { day: 'numeric', month: 'short', year: 'numeric' }) : 'never'}</b>.</p>
       <button class="btn wide" data-act="exportJSON">Back up (JSON)</button>
@@ -1172,14 +1436,15 @@ function settingsView() {
       <p class="muted" id="persist">Checking…</p>
       <p class="muted">${S.sessions.length} sessions · ${S.routines.length} routines · ${S.ex.size} exercises · ${S.weights.length} weigh-ins</p>
     </section>
-    <section class="card">
-      <h2>Updates</h2>
+    <section class="card" data-tour="sHelp">
+      <h2>Help & updates</h2>
       <p class="muted">You’re on <b>${APP_NAME} v${APP_VERSION}</b>.${UI.upd.msg ? ' ' + esc(UI.upd.msg) : ''}</p>
       ${UI.upd.ready ? `<button class="btn wide" data-act="reload">Update now${UI.upd.latest ? ' to v' + esc(UI.upd.latest) : ''}</button>` : ''}
       <div class="two">
         <button class="btn ghost" data-act="checkUpdate" ${UI.upd.busy ? 'disabled' : ''}>${UI.upd.busy ? 'Checking…' : 'Check for updates'}</button>
         <button class="btn ghost" data-act="whatsNew">What’s new</button>
       </div>
+      <button class="btn ghost wide" data-act="tourAll">How to use the app</button>
     </section>
     <p class="muted center">${APP_NAME} v${APP_VERSION}</p>`;
 }
@@ -1452,6 +1717,7 @@ const ACT = {
   editSession: d => { UI.draft = null; go(`history/${d.id}/edit`); },
   saveEdit: async () => {
     const d = UI.draft;
+    if (d.end && d.end <= d.start) return tell('Finish is before the start', 'Set a length, or a finish time after the start.');
     d.items = d.items.filter(it => it.sets.length);
     tidyGroups(d.items);
     await putSession(d); UI.draft = null; toast('Session updated');
@@ -1543,17 +1809,19 @@ const ACT = {
   },
   planIcs: (d, el, ev) => calExport(d, ev),
   // history calendar
-  hview: d => { UI.hview = d.v; UI.hday = null; rerender(); },
+  hview: d => { UI.hview = d.v; UI.hday = null; UI.hbar = null; rerender(); },
+  hpie: d => { UI.hpie = d.v; rerender(); },
+  hbar: d => { UI.hbar = UI.hbar === +d.v ? null : +d.v; rerender(); },
   hnav: d => {
     const v = +d.v; const c = new Date(UI.hcur);
     if (!v) UI.hcur = Date.now();
     else if (UI.hview === 'week') UI.hcur = addDays(c, 7 * v).getTime();
     else if (UI.hview === 'month') UI.hcur = new Date(c.getFullYear(), c.getMonth() + v, 1).getTime();
     else UI.hcur = new Date(c.getFullYear() + v, c.getMonth(), 1).getTime();
-    UI.hday = null; rerender();
+    UI.hday = null; UI.hbar = null; rerender();
   },
   hday: d => { UI.hday = UI.hday === d.v ? null : d.v; rerender(); },
-  hmonth: d => { UI.hview = 'month'; UI.hcur = new Date(new Date(UI.hcur).getFullYear(), +d.v, 1).getTime(); UI.hday = null; rerender(); },
+  hmonth: d => { UI.hview = 'month'; UI.hcur = new Date(new Date(UI.hcur).getFullYear(), +d.v, 1).getTime(); UI.hday = null; UI.hbar = null; rerender(); },
   effort: d => { const c = ctx(d.mode); const n = +d.v; c.sess.effort = c.sess.effort === n ? null : n; c.save(); rerender(); },
   theme: d => { setSettings({ theme: d.v }); applyTheme(); rerender(); },
   unit: d => {
@@ -1576,6 +1844,11 @@ const ACT = {
   pickDone: () => { const p = UI.picker; UI.picker = null; renderSheet(); p.onPick([...p.sel]); },
   closeSheet: () => closeSheet(),
   whatsNew: () => openSheet('news'),
+  tour: d => startTour(d.v, false),
+  tourAll: () => startTour('train', true),
+  tourNext: () => tourNext(),
+  tourBack: () => { if (UI.tour?.i) { UI.tour.i--; showTour(); } },
+  tourEnd: () => endTour(),
   checkUpdate: () => checkUpdate(),
   catReset: d => { const cc = { ...(cfg().catColors || {}) }; delete cc[d.v]; setMeta('settings', { ...(S.meta.settings || {}), catColors: cc }); rerender(); },
   addCat: () => {
@@ -1664,7 +1937,27 @@ const CH = {
     const n = num(v); if (n === null || n < 0) { el.value = cfg()[d.key]; return; }
     setMeta('settings', { ...(S.meta.settings || {}), [d.key]: n }); toast('Saved');
   },
-  sessTime: (d, v) => { if (!v) return; UI.draft[d.key] = new Date(v).getTime(); },
+  // Start moves the whole session (length stays the same).
+  sessTime: (d, v) => {
+    if (!v) return;
+    const dr = UI.draft; const len = dr.end ? dr.end - dr.start : null;
+    dr.start = new Date(v).getTime();
+    if (len !== null) dr.end = dr.start + len;
+    rerender();
+  },
+  sessLen: (d, v, el) => {
+    const m = num(v);
+    if (m === null || m <= 0 || m > 24 * 60) { tell('Check the length', 'Enter the session length in minutes, e.g. 50 or 90.'); return rerender(); }
+    UI.draft.end = UI.draft.start + Math.round(m) * 60000; rerender();
+  },
+  // Finish time of day; a time earlier than the start means the session ran past midnight.
+  sessEnd: (d, v) => {
+    if (!v) return;
+    const [h, mi] = v.split(':').map(Number);
+    const e = new Date(UI.draft.start); e.setHours(h, mi, 0, 0);
+    if (e.getTime() <= UI.draft.start) e.setDate(e.getDate() + 1);
+    UI.draft.end = e.getTime(); rerender();
+  },
   catColor: (d, v) => {
     if (!/^#[0-9a-f]{6}$/i.test(v)) return;
     setMeta('settings', { ...(S.meta.settings || {}), catColors: { ...(cfg().catColors || {}), [d.v]: v } }); rerender();
@@ -1712,6 +2005,10 @@ async function boot() {
   if (S.meta.seenVersion !== APP_VERSION) {
     if (UI.freshInstall) setMeta('seenVersion', APP_VERSION); else openSheet('news');
   }
+  // New installs are offered the tour once.
+  if (UI.freshInstall && !S.meta.active) setTimeout(async () => {
+    if (await sure(`Welcome to ${APP_NAME}`, 'Want a quick tour of how it works? It takes about a minute, and you can skip it at any point.', 'Show me around', 'Not now', false)) startTour('train', true);
+  }, 400);
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('./sw.js').then(reg => {
       swReg = reg;

@@ -2,7 +2,7 @@
 // series: [{ name, points:[{x(ms), y, label?}], mark:'line'|'dots'|'both', tone:'accent'|'muted' }]
 import { fmtDate, esc } from './util.js';
 
-function niceTicks(min, max, count = 4) {
+export function niceTicks(min, max, count = 4) {
   if (min === max) { const d = Math.abs(min) * 0.05 || 1; min -= d; max += d; }
   const span = max - min;
   const step0 = span / count;
@@ -86,4 +86,57 @@ export function renderChart(el, { series, yFmt = v => String(v), note = '' }) {
   hit.addEventListener('pointermove', move);
   hit.addEventListener('pointerdown', move);
   hit.addEventListener('pointerleave', leave);
+}
+
+// Donut chart as an SVG string. slices: [{ v, color }] (largest first); centre: [value, label].
+export function donutSvg(slices, [cv, cl] = ['', '']) {
+  const C = 66, R = 64, r = 41;
+  const total = slices.reduce((t, s) => t + s.v, 0);
+  const pt = (rad, a) => `${(C + rad * Math.cos(a)).toFixed(2)},${(C + rad * Math.sin(a)).toFixed(2)}`;
+  let a0 = -Math.PI / 2;
+  const paths = total ? slices.filter(s => s.v > 0).map(s => {
+    const f = s.v / total;
+    if (f > 0.9999) {   // a single slice: a full ring
+      const t = -Math.PI / 2, b = Math.PI / 2;
+      return `<path fill-rule="evenodd" style="fill:${s.color}" d="M${pt(R, t)}A${R},${R} 0 1 1 ${pt(R, b)}A${R},${R} 0 1 1 ${pt(R, t)}Z M${pt(r, t)}A${r},${r} 0 1 0 ${pt(r, b)}A${r},${r} 0 1 0 ${pt(r, t)}Z"/>`;
+    }
+    const a1 = a0 + f * 2 * Math.PI, big = f > 0.5 ? 1 : 0;
+    const d = `M${pt(R, a0)}A${R},${R} 0 ${big} 1 ${pt(R, a1)}L${pt(r, a1)}A${r},${r} 0 ${big} 0 ${pt(r, a0)}Z`;
+    a0 = a1;
+    return `<path style="fill:${s.color}" d="${d}"/>`;
+  }).join('') : '';
+  return `<svg class="donut" viewBox="0 0 132 132" role="img" aria-hidden="true">${paths}
+    <text class="hole-v" x="66" y="68" text-anchor="middle">${esc(cv)}</text>
+    <text class="hole-l" x="66" y="84" text-anchor="middle">${esc(cl)}</text></svg>`;
+}
+
+// Stacked bar chart drawn into el at its current width.
+// buckets: [{ label, parts: { key: value } }]; keys: stacking order bottom-up; color(key) -> CSS colour;
+// yFmt: tick label; sel: selected bucket index (highlighted); act: data-act for tapping a bar.
+export function renderBars(el, { buckets, keys, color, yFmt = v => String(v), sel = null, act = 'hbar' }) {
+  const W = Math.max(280, el.clientWidth || 340), H = 170;
+  const L = 34, R = 4, T = 8, B = 22;
+  const totals = buckets.map(b => keys.reduce((t, k) => t + (b.parts[k] || 0), 0));
+  const ticks = niceTicks(0, Math.max(...totals, 1), 3);
+  const ymax = ticks[ticks.length - 1] || 1;
+  const sy = v => T + (1 - v / ymax) * (H - T - B);
+  const slot = (W - L - R) / buckets.length;
+  const bw = Math.min(36, slot * 0.62);
+  const grid = ticks.map(t => `<line class="grid" x1="${L}" x2="${W - R}" y1="${sy(t)}" y2="${sy(t)}"/>
+    <text class="axis" x="${L - 6}" y="${sy(t) + 4}" text-anchor="end">${esc(yFmt(t))}</text>`).join('');
+  const bars = buckets.map((b, i) => {
+    const x = L + slot * i + (slot - bw) / 2;
+    let y0 = 0;
+    const segs = keys.filter(k => b.parts[k] > 0).map(k => {
+      const v = b.parts[k];
+      const y = sy(y0 + v), h = sy(y0) - y;
+      y0 += v;
+      return `<rect class="seg" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0, h).toFixed(1)}" rx="3" style="fill:${color(k)}"/>`;
+    }).join('');
+    const showLabel = buckets.length <= 12;
+    return `${i === sel ? `<rect class="bar-on" x="${(L + slot * i + 1).toFixed(1)}" y="${T}" width="${(slot - 2).toFixed(1)}" height="${H - T - B}" rx="6"/>` : ''}${segs}
+      ${showLabel ? `<text class="axis" x="${(x + bw / 2).toFixed(1)}" y="${H - 6}" text-anchor="middle">${esc(b.label)}</text>` : ''}
+      <rect class="hitb" data-act="${act}" data-v="${i}" x="${(L + slot * i).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="${H}"><title>${esc(b.label)}</title></rect>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="Training time per period">${grid}${bars.join('')}</svg>`;
 }
